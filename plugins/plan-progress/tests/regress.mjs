@@ -283,6 +283,13 @@ const C = {
     const r = await E.stop('All set.')
     return [`${r.block ? 'blocked' : 'passes'}`, !!r.block]
   },
+  async demo_bar_does_not_hold_the_turn(E) {
+    await E.turnStart()
+    await E.command('progress-demo')
+    await E.work('Edit')
+    const r = await E.stop('All set.')
+    return [`${E.plans().map(p => p.id)}; ${r.block ? 'blocked' : 'passes'}`, E.plans().some(p => p.id === 'demo') && !r.block]
+  },
   async terminal_bar_is_a_raster_that_fits(E) {
     await create(E)
     const out = []

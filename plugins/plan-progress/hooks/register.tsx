@@ -910,7 +910,7 @@ function play($: EngineInterface, name: 'decision' | 'error' | 'done') {
 
 // the agents bar is the mod's own; the model never owes it an update
 const AGENTS = 'agents:auto' // slug() never yields ':', so no model id can take it
-const isOpenPlan = (p: Plan) => p.id !== AGENTS && p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
+const isOpenPlan = (p: Plan) => p.id !== AGENTS && p.id !== 'demo' && p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
 
 const slug = (s: string) =>
   s

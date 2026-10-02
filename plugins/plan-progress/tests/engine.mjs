@@ -86,6 +86,7 @@ export async function boot(file, kept = new Map()) {
     agentTool: (agentId, tool) => dispatch('tool.call', { tool, agentId, tool_use_id: uid() }, () => ({ result: {} })),
     turnComplete: (agentId, reason = 'answer') => dispatch('turn.complete', { agentId, reason }, () => ({})),
     turnStart: () => dispatch('turn.start', {}, () => ({})),
+    command: name => dispatch('command.run', { command: name, args: '' }, () => ({})),
     sessionStart: () => dispatch('session.start', {}, () => ({})),
     stop: (msg = 'Done.') => dispatch('classic.Stop', { stop_hook_active: false, last_assistant_message: msg, background_tasks: [] }, () => ({})),
     plans: () => $.__get({ ref: { key: 'plans' }, initial: [] }),
