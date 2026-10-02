@@ -17,7 +17,7 @@ Live progress bars above the Claude Code prompt. Claude breaks medium and large 
 - The plan can be rewritten mid-run: resent stages keep finished steps by title, and the percent follows
 - Bars survive closing the app: each session's bars are saved and come back when the session is resumed
 - Soft sounds when Claude needs a decision, hits an error or finishes
-- A **Progress** button in the footer is always there while the mod is loaded; it hides and shows the bars
+- A **Progress** button in the footer is always there while the mod is loaded; it hides and shows the bars (in the terminal outside fullscreen, where clicks do not reach it, it is a plain label)
 - A small bundled skill documents the tool for Claude, loaded only when needed
 
 ### Install
@@ -44,7 +44,9 @@ The mod registers a `plan_progress` tool. Claude creates a bar once with the ful
 
 The track is drawn as a still image and the hover parts sit in a see-through layer on top, so agent updates redraw only their own strip and nothing flickers.
 
-Built with Claude Code mods (function hooks). The bar looks best in the desktop app; the terminal gets a text bar.
+In the terminal the bar is a `Raster` cell grid: braille dots for the pixel fill, the same twinkle periods as the desktop, a glide on step changes and a square pill, repainted with `$.ui.blit` about 30 times a second while a bar is running or waiting. Its fill is one flat tone per bar, since the terminal palette holds a limited set of colour pairs and a per-cell gradient breaks into blocks. Outside fullscreen the terminal does not report clicks, so the close buttons are hidden there; `/progress` and `/progress-clear` do the same from the keyboard.
+
+Built with Claude Code mods (function hooks).
 
 ### Tests
 

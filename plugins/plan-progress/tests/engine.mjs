@@ -15,6 +15,7 @@ export async function boot(file, kept = new Map()) {
   const every = []
   const sounds = []
   let toolSpec = null
+  const blits = []
   const $ = {
     __get(a) {
       return state.has(a.ref.key) ? state.get(a.ref.key) : a.initial
@@ -38,7 +39,15 @@ export async function boot(file, kept = new Map()) {
     plugin: { root: '/plugin' },
     tool: { register: async spec => void (toolSpec = spec) },
     command: { register: async () => {} },
-    ui: { resolve: () => ({ Box: 'Box', Button: 'Button', Text: 'Text', Svg: 'Svg' }), toast: () => {} },
+    config: { list: async () => [] },
+    ui: {
+      resolve: e => (e?.surface === 'terminal' ? { Box: 'Box', Button: 'Button', Text: 'Text', Raster: 'Raster' } : { Box: 'Box', Button: 'Button', Text: 'Text', Svg: 'Svg' }),
+      toast: () => {},
+      blit: async args => {
+        blits.push(args)
+        return {}
+      },
+    },
   }
   const matches = (m, e) => !m || Object.entries(m).every(([k, v]) => e[k] === v)
   const dispatch = (event, e, core) => {
@@ -53,6 +62,7 @@ export async function boot(file, kept = new Map()) {
   const api = {
     $,
     sounds,
+    blits,
     coreRuns,
     get toolSpec() {
       return toolSpec
@@ -89,6 +99,30 @@ export async function boot(file, kept = new Map()) {
         if (Array.isArray(n)) return n.forEach(walk)
         if (!n || typeof n !== 'object') return
         if (n.type === 'Svg') found.push(n.props)
+        ;(n.children ?? []).forEach(walk)
+      }
+      walk(tree)
+      return found
+    },
+    terminal: async (cols = 120, isFullscreen = false) => {
+      const tree = await dispatch('ui.render', { component: 'AbovePrompt', surface: 'terminal', requestId: 'band', viewport: { columns: cols, rows: 40, isFullscreen }, props: { bodyColumns: cols, hasSurvey: false } }, () => null)
+      const found = []
+      const walk = n => {
+        if (Array.isArray(n)) return n.forEach(walk)
+        if (!n || typeof n !== 'object') return
+        found.push(n)
+        ;(n.children ?? []).forEach(walk)
+      }
+      walk(tree)
+      return found
+    },
+    footer: async (surface, isFullscreen) => {
+      const tree = await dispatch('ui.render', { component: 'SessionMode', surface, viewport: { columns: 120, rows: 40, isFullscreen }, props: { modes: [] } }, () => null)
+      const found = []
+      const walk = n => {
+        if (Array.isArray(n)) return n.forEach(walk)
+        if (!n || typeof n !== 'object') return
+        found.push(n)
         ;(n.children ?? []).forEach(walk)
       }
       walk(tree)

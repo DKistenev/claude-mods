@@ -5,6 +5,12 @@ const file = process.argv[2] ?? './register.mjs'
 const three = () => [S('One', st('A', 'active'), 'B'), S('Two', 'C')]
 const create = (E, id = 't', stages = three(), title = 'Task') => E.call({ id, title, stages })
 const res = r => r.deny ?? r.result
+const glyphs = cells => {
+  const w = new Uint32Array(Uint8Array.from(Buffer.from(cells, 'base64')).buffer)
+  let out = ''
+  for (let i = 0; i < w.length; i += 3) out += String.fromCodePoint(w[i])
+  return out
+}
 const pct = async (E, id) => (await E.view(id)).alt.match(/\d+%/)?.[0]
 
 const C = {
@@ -276,6 +282,45 @@ const C = {
     await E.work('Edit')
     const r = await E.stop('All set.')
     return [`${r.block ? 'blocked' : 'passes'}`, !!r.block]
+  },
+  async terminal_bar_is_a_raster_that_fits(E) {
+    await create(E)
+    const out = []
+    for (const cols of [120, 60]) {
+      const nodes = await E.terminal(cols)
+      const r = nodes.find(n => n.type === 'Raster' && n.props.key === 'track-t')
+      const row = glyphs(r.props.cells)
+      out.push({ cols, w: r.props.columns, row })
+    }
+    const fits = out.every(o => o.w + 'Task'.length + 13 <= o.cols)
+    return [out.map(o => `${o.cols}: ${o.row.trim()}`).join(' | '), fits && out.every(o => o.row.includes('One 1/2'))]
+  },
+  async terminal_animates_by_blits(E) {
+    await create(E)
+    await E.call({ id: 't', next: true })
+    await E.terminal(120)
+    const frames = []
+    for (let i = 0; i < 10; i++) {
+      E.tick(100)
+      await E.everyTick()
+      frames.push(E.blits.filter(b => b.key === 'track-t').at(-1)?.cells)
+    }
+    const distinct = new Set(frames.filter(Boolean)).size
+    return [`${E.blits.length} blits, ${distinct} distinct frames`, distinct > 1]
+  },
+  async terminal_buttons_only_where_clicks_land(E) {
+    await create(E)
+    const band = async fs => (await E.terminal(120, fs)).filter(n => n.type === 'Button').length
+    const foot = async fs => (await E.footer('terminal', fs)).filter(n => n.type === 'Button').length
+    const desk = (await E.footer('desktop', undefined)).filter(n => n.type === 'Button').length
+    const r = [await band(false), await band(true), await foot(false), await foot(true), desk]
+    return [`band ${r[0]}/${r[1]}, footer ${r[2]}/${r[3]}, desktop ${r[4]}`, r.join() === '0,1,0,1,1']
+  },
+  async desktop_still_draws_svg(E) {
+    await create(E)
+    const svgs = await E.svgs()
+    const term = await E.terminal(120)
+    return [`${svgs.length} svg, ${term.filter(n => n.type === 'Svg').length} svg in terminal`, svgs.length > 0 && !term.some(n => n.type === 'Svg')]
   },
 }
 
