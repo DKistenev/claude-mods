@@ -641,6 +641,252 @@ function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? '' : 's'}`
 }
 
+const DEFAULT = 0x01000000
+let isLight = false
+const termBg = () => (isLight ? [255, 255, 255] : [24, 24, 27])
+const termFg = () => (isLight ? [34, 34, 38] : [240, 238, 252])
+const pack = (c: number[]) => ((c[0] ?? 0) << 16) | ((c[1] ?? 0) << 8) | (c[2] ?? 0)
+const isWide = (cp: number) => cp > 0xffff || (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) || (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6)
+const cellText = (s: string) => [...s].map(ch => (isWide(ch.codePointAt(0) ?? 63) || (ch.codePointAt(0) ?? 0) < 32 ? '·' : ch)).join('')
+const cellsOf = (s: string) => [...s].reduce((w, ch) => w + (isWide(ch.codePointAt(0) ?? 0) ? 2 : 1), 0)
+const fit = (s: string, w: number) => {
+  const chars = [...cellText(s)]
+  if (chars.length <= w) return chars.join('')
+  return w <= 1 ? '…'.slice(0, w) : chars.slice(0, w - 1).join('').trimEnd() + '…'
+}
+
+type Cell = [number, number, number]
+
+class Grid {
+  cells: Cell[]
+  constructor(
+    readonly columns: number,
+    readonly rows: number,
+  ) {
+    this.cells = Array.from({ length: columns * rows }, () => [32, DEFAULT, DEFAULT] as Cell)
+  }
+  set(x: number, y: number, ch: string | number, fg: number, bg: number) {
+    if (x < 0 || x >= this.columns || y < 0 || y >= this.rows) return
+    this.cells[y * this.columns + x] = [typeof ch === 'number' ? ch : (ch.codePointAt(0) ?? 32), fg, bg]
+  }
+  bg(x: number, y: number) {
+    return this.cells[y * this.columns + x]?.[2] ?? DEFAULT
+  }
+  text(x: number, y: number, s: string, fg: number, bg?: number) {
+    let i = 0
+    for (const ch of cellText(s)) {
+      this.set(x + i, y, ch, fg, bg ?? this.bg(x + i, y))
+      i++
+    }
+    return i
+  }
+  encode() {
+    const words = new Uint32Array(this.cells.length * 3)
+    this.cells.forEach((c, i) => words.set(c, i * 3))
+    return (new Uint8Array(words.buffer) as Uint8Array & { toBase64: () => string }).toBase64()
+  }
+}
+
+const BRAILLE_BITS = [
+  [0x01, 0x08],
+  [0x02, 0x10],
+  [0x04, 0x20],
+  [0x40, 0x80],
+]
+
+function pill(g: Grid, y: number, from: number, to: number, bgAt: (x: number) => number[]) {
+  for (let x = from; x < to; x++) g.set(x, y, ' ', DEFAULT, pack(bgAt(x)))
+}
+
+const LEVELS = 8
+const q = (m: number) => Math.round(Math.max(0, Math.min(1, m)) * LEVELS) / LEVELS
+const wave = (t: number, periodMs: number, offset = 0) => 0.5 + 0.5 * Math.sin(((t / periodMs) + offset) * Math.PI * 2)
+const easeOut = (x: number) => 1 - Math.pow(1 - Math.max(0, Math.min(1, x)), 4)
+
+const glide = new Map<string, { from: number; to: number; at: number }>()
+const GLIDE_MS = 450
+
+function headAt(id: string, target: number, t: number): number {
+  const g = glide.get(id)
+  if (!g) {
+    glide.set(id, { from: target, to: target, at: t })
+    return target
+  }
+  const cur = g.from + (g.to - g.from) * easeOut((t - g.at) / GLIDE_MS)
+  if (Math.abs(g.to - target) > 0.01) {
+    glide.set(id, { from: cur, to: target, at: t })
+    return cur
+  }
+  return cur
+}
+
+const isLive = (p: Plan, t: number) => {
+  const g = glide.get(p.id)
+  return p.state === 'running' || p.state === 'needs_input' || (g !== undefined && g.from !== g.to && t - g.at < GLIDE_MS + 100)
+}
+
+function trackCells(p: Plan, W: number, t: number): string {
+  const g = new Grid(W, 1)
+  const w = where(p)
+  const done = p.state === 'done'
+  const target = (done ? 1 : Math.min(1, w.pos / Math.max(1, w.total))) * W
+  const fx = headAt(p.id, target, t)
+  const back = termBg()
+  const acc = hex(STATE_COLOR[p.state])
+  const light = mix(acc, [255, 255, 255], 0.35)
+  const grey = [120, 118, 128]
+  const track = mix(back, [128, 128, 128], isLight ? 0.14 : 0.18)
+  const fill = mix(track, acc, done ? 0.3 : 0.17)
+  const under = (x: number) => (x + 0.5 < fx ? fill : track)
+  pill(g, 0, 0, W, under)
+
+  const TWINKLE = done ? [3200, 3800, 4400, 3500] : [2200, 2800, 1900, 3300]
+  const DELAY = [0, 700, 1300, 400]
+  const dim = done ? 0.2 : 0.55
+  for (let col = 0; col < Math.min(W, Math.ceil(fx)); col++) {
+    const u = Math.min(1, (col + 0.5) / Math.max(1, fx))
+    const dense = done ? 0.8 : 0.22 + 0.78 * Math.pow(u, 1.5)
+    let bits = 0
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 2; c++) {
+        const sx = col * 2 + c
+        if (sx / 2 >= fx || hash(sx, r, 1) > dense * 0.6) continue
+        bits |= BRAILLE_BITS[r]?.[c] ?? 0
+      }
+    }
+    if (bits === 0) continue
+    const cls = Math.floor(hash(col, 0, 2) * 4)
+    const period = TWINKLE[cls] ?? 2200
+    const blink = 1 - dim * wave(t + (DELAY[cls] ?? 0), period, 0.25)
+    const bucket = done ? 1 : q(Math.min(1, Math.pow(u, 0.9) * 1.1))
+    const tone = mix(grey, light, bucket)
+    const opacity = (0.35 + 0.65 * dense) * blink
+    g.set(col, 0, 0x2800 + bits, pack(mix(fill, tone, q(opacity))), pack(fill))
+  }
+
+  let k = 0
+  p.stages.forEach(s => {
+    if (k > 0) {
+      const x = Math.round((k / w.total) * W)
+      if (x > 0 && x < W - 1) {
+        const passed = x < fx - 0.5
+        g.set(x, 0, '│', pack(passed ? mix(light, [255, 255, 255], 0.5) : mix(track, isLight ? [0, 0, 0] : [255, 255, 255], 0.3)), pack(under(x)))
+      }
+    }
+    k += s.steps.length
+  })
+
+  const base = hex(STATE_COLOR[p.state])
+  const color = base
+  const single = p.stages.length === 1
+  const number = single ? Math.min(w.total, w.pos + 1) : w.stage + 1
+  const icon = p.state === 'done' ? '✓' : p.state === 'error' ? '✕' : p.state === 'needs_input' ? '?' : ''
+  let name = ''
+  let count = ''
+  if (W < 28) {
+    name = icon || String(number)
+  } else {
+    const agents = p.agents ?? []
+    name = done ? 'Done' : single ? (p.stages[0]?.name ?? 'Tasks') : (p.stages[w.stage]?.name ?? '')
+    const baseCount = p.id === AGENTS ? `${w.pos}/${w.total}` : done ? `${w.total}/${w.total}` : single ? `${number}/${w.total}` : `${w.step}/${w.stageSize}`
+    count = baseCount + (agents.length > 0 && p.id !== AGENTS ? ` · ${agents.filter(a => a.state === 'done').length}/${agents.length}` : '')
+  }
+  const lead = icon && W >= 28 ? `${icon} ` : ''
+  const maxName = Math.max(3, Math.floor(W * (W < 60 ? 0.75 : 0.55)) - cellsOf(lead) - cellsOf(count) - 5)
+  const shown = lead + fit(name, maxName)
+  const kw = cellsOf(shown) + (count ? count.length + 1 : 0) + 2
+  const kx = Math.round(Math.max(0, Math.min(W - kw, fx - kw / 2)))
+  const white = pack([255, 255, 255])
+  pill(g, 0, kx, kx + kw, () => color)
+  let at = kx + 1
+  at += g.text(at, 0, shown, white, pack(color))
+  if (count) g.text(at + 1, 0, count, pack(mix([255, 255, 255], color, 0.3)), pack(color))
+  return g.encode()
+}
+
+function stripCells(v: { shown: AgentRun[]; hidden: AgentRun[] }, W: number, now: number): { cells: string; rows: number } {
+  const rows = v.shown.length + (v.hidden.length > 0 ? 1 : 0)
+  const g = new Grid(W, rows)
+  const back = termBg()
+  const text = pack(termFg())
+  v.shown.forEach((a, y) => {
+    const c = hex(AGENT_COLOR[a.state])
+    const tint = mix(back, c, 0.18)
+    pill(g, y, 0, W, () => tint)
+    const running = a.state === 'running' || a.state === 'waiting'
+    if (running) {
+      for (let col = 1; col < W - 1; col++) {
+        let bits = 0
+        let glow = 0
+        for (let r = 0; r < 4; r++) {
+          for (let cc = 0; cc < 2; cc++) {
+            const sx = col * 2 + cc + y * 83
+            if (hash(sx, r, 5) >= 0.08) continue
+            const b = 1 - 0.55 * wave(now, 1900 + hash(sx, r, 6) * 1400, hash(sx, r, 7))
+            bits |= BRAILLE_BITS[r]?.[cc] ?? 0
+            glow = Math.max(glow, b)
+          }
+        }
+        if (bits) g.set(col, y, 0x2800 + bits, pack(mix(tint, c, 0.2 + 0.4 * q(glow))), pack(tint))
+      }
+    }
+    const indent = a.depth > 0 ? 2 : 0
+    const dotColor = running ? mix(tint, c, 0.3 + 0.7 * q(wave(now, 1100))) : c
+    g.text(2 + indent, y, '●', pack(dotColor), pack(tint))
+    const time = elapsed((a.endedAt ?? now) - a.startedAt)
+    const room = W - 6 - indent - time.length - 2
+    const narrow = W < 30
+    const name = fit((a.depth > 0 ? '↳ ' : '') + a.title, narrow ? W - 6 - indent : Math.floor(room * 0.55))
+    let at = 4 + indent
+    for (let i = -1; i < name.length + 1 && at + i < W - 1; i++) g.set(at + i, y, ' ', DEFAULT, pack(tint))
+    at += g.text(at, y, name, text, pack(tint)) + 1
+    if (narrow) return
+    const tool = fit(a.tool, Math.max(0, W - at - time.length - 4))
+    if (tool) {
+      for (let i = -1; i <= tool.length; i++) g.set(at + i, y, ' ', DEFAULT, pack(tint))
+      g.text(at, y, tool, pack(c), pack(tint))
+    }
+    const tx = W - 2 - time.length
+    for (let i = -1; i < time.length; i++) g.set(tx + i, y, ' ', DEFAULT, pack(tint))
+    g.text(tx, y, time, pack(mix(termFg(), tint, 0.35)), pack(tint))
+  })
+  if (v.hidden.length > 0) {
+    const y = v.shown.length
+    const tint = mix(back, [128, 128, 128], 0.16)
+    pill(g, y, 0, W, () => tint)
+    const doneCount = v.hidden.filter(a => a.state === 'done').length
+    g.text(2, y, fit(`+${plural(v.hidden.length, 'more agent')} · ${doneCount} done`, W - 4), pack(mix(termFg(), tint, 0.35)), pack(tint))
+  }
+  return { cells: g.encode(), rows }
+}
+
+type Band = { requestId: string; W: number; list: readonly Plan[] }
+let band: Band | null = null
+let isFrameBusy = false
+
+async function animate($: EngineInterface) {
+  const b = band
+  if (!b || isFrameBusy) return
+  const now = await $.clock.now()
+  const live = b.list.filter(p => isLive(p, now) || (p.agents ?? []).some(a => a.state === 'running' || a.state === 'waiting'))
+  if (live.length === 0) return
+  isFrameBusy = true
+  try {
+    await Promise.all(
+      live.flatMap(p => {
+        const v = visibleAgents(p, now, stripBudget(b.list.length))
+        const strips = v ? stripCells(v, b.W, now) : null
+        const calls = [$.ui.blit({ requestId: b.requestId, key: `track-${p.id}`, cells: trackCells(p, b.W, now) })]
+        if (strips) calls.push($.ui.blit({ requestId: b.requestId, key: `strips-${p.id}`, cells: strips.cells }))
+        return calls.map(c => c.catch(() => undefined))
+      }),
+    )
+  } finally {
+    isFrameBusy = false
+  }
+}
+
+
 // ---------- engine glue ----------
 
 // the engine's player first (afplay on macOS); PowerShell where it cannot play
@@ -664,7 +910,7 @@ function play($: EngineInterface, name: 'decision' | 'error' | 'done') {
 
 // the agents bar is the mod's own; the model never owes it an update
 const AGENTS = 'agents:auto' // slug() never yields ':', so no model id can take it
-const isOpenPlan = (p: Plan) => p.id !== AGENTS && p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
+const isOpenPlan = (p: Plan) => p.id !== AGENTS && p.id !== 'demo' && p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
 
 const slug = (s: string) =>
   s
@@ -1064,6 +1310,11 @@ export const register: Register = on => {
     })
     // a session reopened later (an app restart, a resume) finds its bars where it left them
     if ((await read($, plans)).length === 0) await restorePlans($)
+    const theme = (await $.config.list().catch(() => [])).find(row => row.key === 'theme')
+    isLight = /light/i.test(String(theme?.value ?? ''))
+    $.clock.every(33, () => {
+      void animate($)
+    })
     $.clock.every(1000, async () => {
       const list = await read($, plans)
       forgetGone(list)
@@ -1170,7 +1421,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
     const count = (await read($, plans)).length
     const open = await read($, isOpen)
-    const { Box, Button } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     // other mods add their labels to modes beneath us; keep them
     const below = await next(e)
     const press = () =>
@@ -1180,7 +1431,11 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="row" alignItems="center" gap={1}>
-        <Button key="progress-toggle" dimColor={count === 0 || !open} label={count > 1 ? `Progress ${count}` : 'Progress'} onPress={press} />
+        {e.surface === 'terminal' && e.viewport?.isFullscreen !== true ? (
+          <Text dimColor>{count > 1 ? `Progress ${count}` : 'Progress'}</Text>
+        ) : (
+          <Button key="progress-toggle" dimColor={count === 0 || !open} label={count > 1 ? `Progress ${count}` : 'Progress'} onPress={press} />
+        )}
         {below}
       </Box>
     )
@@ -1188,7 +1443,53 @@ export const register: Register = on => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const list = await read($, plans)
-    if (list.length === 0 || e.props.hasSurvey || !(await read($, isOpen))) return next(e)
+    if (list.length === 0 || e.props.hasSurvey || !(await read($, isOpen))) {
+      band = null
+      return next(e)
+    }
+    if (e.surface === 'terminal') {
+      const { Box, Button, Text, Raster } = $.ui.resolve(e)
+      await read($, tick)
+      const now = await $.clock.now()
+      const cols = Math.max(30, e.props.bodyColumns || 100)
+      const hasClicks = e.viewport?.isFullscreen === true
+      const titleW = Math.max(4, Math.min(Math.round(cols * 0.28), Math.max(...list.map(p => cellsOf(p.title)))))
+      const trackW = Math.max(12, Math.min(512, cols - titleW - (hasClicks ? 15 : 13)))
+      band = { requestId: e.requestId, W: trackW, list }
+      return (
+        <Box flexDirection="column">
+          {list.map(p => {
+            const v = visibleAgents(p, now, stripBudget(list.length))
+            const strips = v ? stripCells(v, trackW, now) : null
+            const w = where(p)
+            const pct = p.state === 'done' ? 100 : Math.round((Math.min(w.pos, w.total) / Math.max(1, w.total)) * 100)
+            return (
+              <Box key={`bar-${p.id}`} flexDirection="column">
+                <Box flexDirection="row" gap={1}>
+                  <Text color={STATE_COLOR[p.state]}>{STATE_GLYPH[p.state]}</Text>
+                  <Box width={titleW} flexShrink={0}>
+                    <Text wrap="truncate">{p.title}</Text>
+                  </Box>
+                  <Raster key={`track-${p.id}`} columns={trackW} rows={1} cells={trackCells(p, trackW, now)} />
+                  <Text dimColor>{`${String(pct).padStart(3, FIGURE_SPACE)}%`}</Text>
+                  {hasClicks ? <Button key={`close-${p.id}`} plain dimColor label="✕" onPress={() => dropPlan($, p.id)} /> : null}
+                </Box>
+                {p.note && p.state !== 'running' ? (
+                  <Box marginLeft={titleW + 3}>
+                    <Text color={STATE_COLOR[p.state]} wrap="truncate">{p.note}</Text>
+                  </Box>
+                ) : null}
+                {strips ? (
+                  <Box marginLeft={titleW + 3}>
+                    <Raster key={`strips-${p.id}`} columns={trackW} rows={strips.rows} cells={strips.cells} />
+                  </Box>
+                ) : null}
+              </Box>
+            )
+          })}
+        </Box>
+      )
+    }
     const t = $.ui.resolve(e)
     const { Box, Button, Text } = t
     const Svg = 'Svg' in t ? t.Svg : null
