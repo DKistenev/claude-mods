@@ -34,7 +34,7 @@ Or copy `plugins/plan-progress` into `~/.claude/skills/plan-progress` to load it
 ### Commands
 
 - `/progress` toggles the bars
-- `/progress-demo` plays a short demo: two tasks with their agents, a question, an error, a rewritten plan
+- `/progress-demo` shows a sample bar
 - `/progress-sounds` plays the three sounds
 - `/progress-clear` removes all bars
 
@@ -44,7 +44,7 @@ The mod registers a `plan_progress` tool. Claude creates a bar once with the ful
 
 The track is drawn as a still image and the hover parts sit in a see-through layer on top, so agent updates redraw only their own strip and nothing flickers.
 
-In the terminal the bar is a `Raster` cell grid: braille dots for the pixel fill, the same twinkle periods as the desktop, a glide on step changes and a square pill, repainted with `$.ui.blit` about 30 times a second while a bar is running or waiting. Its fill is one flat tone per bar, since the terminal palette holds a limited set of colour pairs and a per-cell gradient breaks into blocks. Outside fullscreen the terminal does not report clicks, so the close buttons are hidden there; `/progress` and `/progress-clear` do the same from the keyboard.
+In the terminal the bar is a `Raster` cell grid: braille dots for the pixel fill, the same twinkle periods as the desktop, a glide on step changes and a square pill, repainted with `$.ui.blit` about 30 times a second while Claude works on a bar or its agents run; a bar waiting on you or left open after the turn stands still. Its fill is one flat tone per bar, since the terminal palette holds a limited set of colour pairs and a per-cell gradient breaks into blocks. Outside fullscreen the terminal does not report clicks, so the close buttons are hidden there; `/progress` and `/progress-clear` do the same from the keyboard.
 
 Built with Claude Code mods (function hooks).
 

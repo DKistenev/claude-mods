@@ -303,6 +303,7 @@ const C = {
     return [out.map(o => `${o.cols}: ${o.row.trim()}`).join(' | '), fits && out.every(o => o.row.includes('One 1/2'))]
   },
   async terminal_animates_by_blits(E) {
+    await E.turnStart()
     await create(E)
     await E.call({ id: 't', next: true })
     await E.terminal(120)
@@ -314,6 +315,56 @@ const C = {
     }
     const distinct = new Set(frames.filter(Boolean)).size
     return [`${E.blits.length} blits, ${distinct} distinct frames`, distinct > 1]
+  },
+  async frame_clock_only_with_a_moving_terminal_bar(E) {
+    await E.turnStart()
+    await create(E)
+    await E.svgs()
+    await E.everyTick()
+    const desktop = E.frameTimers()
+    await E.terminal(120)
+    await E.everyTick()
+    const terminal = E.frameTimers()
+    return [`desktop ${desktop}, terminal ${terminal}`, desktop === 0 && terminal === 1]
+  },
+  async terminal_bar_stands_still_after_the_turn(E) {
+    await E.turnStart()
+    await create(E)
+    await E.terminal(120)
+    await E.everyTick()
+    const during = E.frameTimers()
+    await E.turnComplete(undefined)
+    E.tick(1000)
+    await E.everyTick()
+    const before = E.blits.length
+    E.tick(100)
+    await E.everyTick()
+    const after = E.frameTimers()
+    return [`timer during turn ${during}, after ${after}, blits after ${E.blits.length - before}`, during === 1 && after === 0 && E.blits.length === before]
+  },
+  async waiting_bar_stands_still(E) {
+    await E.turnStart()
+    await create(E)
+    await E.call({ id: 't', state: 'needs_input', note: 'Pick one' })
+    await E.terminal(120)
+    E.tick(1000)
+    await E.everyTick()
+    return [`frame timers ${E.frameTimers()}`, E.frameTimers() === 0]
+  },
+  async closed_bar_forgets_its_glide(E) {
+    await E.turnStart()
+    await create(E)
+    await E.terminal(120)
+    await E.call({ id: 't', next: true })
+    await E.terminal(120)
+    E.tick(1000)
+    await E.terminal(120)
+    await E.command('progress-clear')
+    await create(E)
+    const row = (await E.terminal(120)).find(n => n.type === 'Raster' && n.props.key === 'track-t')
+    // a fresh bar at step 1 has no fill, so its pill sits at the left edge instead of sliding back from the old head
+    const first = glyphs(row.props.cells).indexOf('One')
+    return [`pill text at column ${first}`, first >= 0 && first <= 2]
   },
   async terminal_buttons_only_where_clicks_land(E) {
     await create(E)

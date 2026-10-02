@@ -25,7 +25,12 @@ export async function boot(file, kept = new Map()) {
       state.set(a.ref.key, v)
       return v
     },
-    clock: { now: async () => now, after: (ms, cb) => void timers.push({ at: now + ms, cb }), every: (ms, cb) => void every.push(cb) },
+    clock: { now: async () => now, after: (ms, cb) => void timers.push({ at: now + ms, cb }), every: (ms, cb) => {
+        const t = { ms, cb, isOn: true }
+        every.push(t)
+        return { cancel: () => void (t.isOn = false) }
+      },
+    },
     // the plugin's store outlives a boot when the caller passes the same map, as it outlives a restart
     store: {
       get: async k => (kept.has(k) ? JSON.parse(kept.get(k)) : undefined),
@@ -68,9 +73,11 @@ export async function boot(file, kept = new Map()) {
       return toolSpec
     },
     tick: ms => (now += ms),
+    // one period of every live timer; a timer started during the pass waits for the next one
     everyTick: async () => {
-      for (const cb of every) await cb()
+      for (const t of [...every]) if (t.isOn) await t.cb()
     },
+    frameTimers: () => every.filter(t => t.isOn && t.ms < 100).length,
     fireTimers: async () => {
       for (const t of timers.splice(0)) await t.cb()
     },

@@ -720,10 +720,6 @@ function headAt(id: string, target: number, t: number): number {
   return cur
 }
 
-const isLive = (p: Plan, t: number) => {
-  const g = glide.get(p.id)
-  return p.state === 'running' || p.state === 'needs_input' || (g !== undefined && g.from !== g.to && t - g.at < GLIDE_MS + 100)
-}
 
 function trackCells(p: Plan, W: number, t: number): string {
   const g = new Grid(W, 1)
@@ -863,12 +859,32 @@ function stripCells(v: { shown: AgentRun[]; hidden: AgentRun[] }, W: number, now
 type Band = { requestId: string; W: number; list: readonly Plan[] }
 let band: Band | null = null
 let isFrameBusy = false
+// a bar twinkles only while Claude works on it; one waiting on the person or left open after the turn stands still
+let isTurnLive = false
+let frames: { cancel: () => void } | null = null
+
+const hasRunningAgents = (p: Plan) => (p.agents ?? []).some(a => a.state === 'running' || a.state === 'waiting')
+const isGliding = (p: Plan, t: number) => {
+  const g = glide.get(p.id)
+  return g !== undefined && g.from !== g.to && t - g.at < GLIDE_MS + 100
+}
+const isAnimated = (p: Plan, t: number) => (isTurnLive && p.state === 'running') || hasRunningAgents(p) || isGliding(p, t)
+
+// the 30 fps clock runs only while a terminal band has something moving; the second timer starts and stops it
+function syncFrames($: EngineInterface, now: number) {
+  const isWanted = band !== null && band.list.some(p => isAnimated(p, now))
+  if (isWanted && !frames) frames = $.clock.every(33, () => void animate($))
+  if (!isWanted && frames) {
+    frames.cancel()
+    frames = null
+  }
+}
 
 async function animate($: EngineInterface) {
   const b = band
   if (!b || isFrameBusy) return
   const now = await $.clock.now()
-  const live = b.list.filter(p => isLive(p, now) || (p.agents ?? []).some(a => a.state === 'running' || a.state === 'waiting'))
+  const live = b.list.filter(p => isAnimated(p, now))
   if (live.length === 0) return
   isFrameBusy = true
   try {
@@ -1027,6 +1043,7 @@ function forgetGone(list: readonly Plan[]) {
   const live = new Set(list.flatMap(p => (p.agents ?? []).filter(a => a.state === 'running' || a.state === 'waiting').map(a => a.id)))
   const shown = new Set(list.flatMap(p => (p.agents ?? []).map(a => a.id)))
   for (const id of lastHead.keys()) if (!bars.has(id)) lastHead.delete(id)
+  for (const id of glide.keys()) if (!bars.has(id)) glide.delete(id)
   for (const id of lastSource.keys()) {
     const [bar, strip] = id.split('/')
     if (!bars.has(bar ?? '') || (strip !== undefined && strip !== '+' && !shown.has(strip))) lastSource.delete(id)
@@ -1041,6 +1058,7 @@ function forgetGone(list: readonly Plan[]) {
 
 async function dropPlan($: EngineInterface, id: string) {
   lastHead.delete(id)
+  glide.delete(id)
   for (const p of await read($, plans)) if (p.id === id) for (const a of p.agents ?? []) lastStrip.delete(a.id)
   await update($, plans, list => list.filter(p => p.id !== id))
 }
@@ -1187,6 +1205,7 @@ export const register: Register = on => {
   let isWaitingOnBackground = false
 
   on('turn.start', async ($, e, next) => {
+    isTurnLive = true
     workCalls = 0
     sinceUpdate = 0
     isPlanTouched = false
@@ -1312,12 +1331,10 @@ export const register: Register = on => {
     if ((await read($, plans)).length === 0) await restorePlans($)
     const theme = (await $.config.list().catch(() => [])).find(row => row.key === 'theme')
     isLight = /light/i.test(String(theme?.value ?? ''))
-    $.clock.every(33, () => {
-      void animate($)
-    })
     $.clock.every(1000, async () => {
       const list = await read($, plans)
       forgetGone(list)
+      syncFrames($, await $.clock.now())
       if (list !== lastSaved) await savePlans($, list)
       // clocks count inside the frame, so the only timed redraw is folding finished strips away
       if (foldUntil === 0 || (await $.clock.now()) < foldUntil) return
@@ -1404,6 +1421,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'progress-clear' }, async $ => {
+    glide.clear()
     await update($, plans, () => [])
 
     return { text: 'Progress bars removed.' }
@@ -1628,6 +1646,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const agentId = e.agentId
+    if (!agentId) isTurnLive = false
     if (agentId && agentHome.has(agentId)) {
       const now = await $.clock.now()
       const isFailed = e.reason !== 'answer'
