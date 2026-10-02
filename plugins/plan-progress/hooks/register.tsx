@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Plan, PlanStage, PlanState, PlanStep, StepStatus } from '../types'
+import type { AgentRun, Plan, PlanStage, PlanState, PlanStep, StepStatus } from '../types'
 
 const TOOL = 'mcp__plan-progress__plan_progress'
 const plans = atom({ plugin: 'plan-progress', key: 'plans' } as const, [])
@@ -9,6 +9,11 @@ const MAX_BARS = 3
 // a space as wide as a digit, so '  0%' and '100%' take the same room
 const FIGURE_SPACE = String.fromCharCode(0x2007)
 const isOpen = atom({ plugin: 'plan-progress', key: 'isOpen' } as const, true)
+const tick = atom({ plugin: 'plan-progress', key: 'tick' } as const, 0)
+const STRIP_H = 18
+const STRIP_GAP = 3
+const MAX_STRIPS = 4 // past this, the finished ones fold into one "+N more" strip
+const FOLD_MS = 5000 // finished strips stay this long, failed ones stay until the bar closes
 
 const STATE_COLOR: Record<PlanState, string> = { running: '#8B7CF6', needs_input: '#E09A1E', error: '#E5484D', done: '#30A46C' }
 const STATE_GLYPH: Record<PlanState, string> = { running: '●', needs_input: '?', error: '!', done: '✓' }
@@ -268,7 +273,10 @@ function trackSvg(p: Plan, W: number): string {
     }`
   } else {
     const name = done ? 'Done' : single ? (p.stages[0]?.name ?? 'Tasks') : (p.stages[w.stage]?.name ?? '')
-    const count = done ? `${w.total}/${w.total}` : single ? `${number}/${w.total}` : `${w.step}/${w.stageSize}`
+    const agents = p.agents ?? []
+    const base = p.id === AGENTS ? `${w.pos}/${w.total}` : done ? `${w.total}/${w.total}` : single ? `${number}/${w.total}` : `${w.step}/${w.stageSize}`
+    const agentCount = agents.length > 0 && p.id !== AGENTS ? ` · ${agents.filter(a => a.state === 'done').length}/${agents.length} agents` : ''
+    const count = base + agentCount
     const iconW = icon ? 16 : 0
     const countW = textWidth(count, 6.5)
     const maxW = Math.max(80, W * 0.55)
@@ -308,6 +316,95 @@ rect[class]{width:2px;height:2px}
 <g transform="translate(${kx.toFixed(1)} 0)">${glideKnob}${knob}</g></svg>`
 }
 
+const AGENT_COLOR: Record<AgentRun['state'], string> = {
+  running: STATE_COLOR.running,
+  waiting: STATE_COLOR.needs_input,
+  done: STATE_COLOR.done,
+  error: STATE_COLOR.error,
+}
+
+const elapsed = (ms: number) => {
+  const sec = Math.max(0, Math.round(ms / 1000))
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`
+}
+
+// which strips show: all of a small batch; in a big one the unfinished first, the rest folded into one line
+function visibleAgents(p: Plan, now: number): { shown: AgentRun[]; hidden: AgentRun[] } | null {
+  const list = p.agents ?? []
+  if (list.length === 0) return null
+  const hasError = list.some(a => a.state === 'error')
+  if (p.agentsDoneAt && now - p.agentsDoneAt > FOLD_MS && !hasError) return null
+  if (list.length <= MAX_STRIPS) return { shown: list, hidden: [] }
+  const keep = new Set(list.filter(a => a.state !== 'done').slice(0, MAX_STRIPS - 1).map(a => a.id))
+  for (const a of [...list].reverse()) {
+    if (keep.size >= MAX_STRIPS - 1) break
+    keep.add(a.id)
+  }
+  return { shown: list.filter(a => keep.has(a.id)), hidden: list.filter(a => !keep.has(a.id)) }
+}
+
+// what each strip showed last time it was drawn, so a change morphs from the old status instead of jumping
+const lastStrip = new Map<string, { tool: string; color: string }>()
+const MORPH = '.2s'
+
+const stripsHeight = (n: number) => n * STRIP_H + (n - 1) * STRIP_GAP
+
+// one tinted strip per agent: state colour, name, what it does now and for how long; not a progress bar
+function stripsSvg(v: { shown: AgentRun[]; hidden: AgentRun[] }, W: number, now: number): string {
+  const isNarrow = W < NARROW
+  const rows: string[] = []
+  v.shown.forEach((a, i) => {
+    const c = AGENT_COLOR[a.state]
+    const y = i * (STRIP_H + STRIP_GAP)
+    const indent = a.depth > 0 ? 12 : 0
+    let px = ''
+    if (a.state === 'running') {
+      for (let col = 0; col * 3 < W; col++) {
+        for (let r = 0; r < 4; r++) {
+          if (hash(col + i * 41, r, 5) > 0.2) continue
+          px += `<rect x="${col * 3}" y="${y + 3 + r * 3.6}" class="t${Math.floor(hash(col, r, 6) * 4)}" fill="${c}" fill-opacity=".32"/>`
+        }
+      }
+    }
+    const nameRoom = isNarrow ? W - 30 - indent : W * 0.5
+    let name = (a.depth > 0 ? '↳ ' : '') + a.title
+    while (name.length > 4 && textWidth(name, 6.2) > nameRoom) name = name.slice(0, -1)
+    if (name !== (a.depth > 0 ? '↳ ' : '') + a.title) name = name.trimEnd() + '…'
+    const nameX = 19 + indent
+    const toolX = nameX + textWidth(name, 6.2) + 8
+    const time = elapsed((a.endedAt ?? now) - a.startedAt)
+    // a status change: the old word blurs out while the new one blurs in, and the tint flows to the new colour
+    const was = lastStrip.get(a.id)
+    lastStrip.set(a.id, { tool: a.tool, color: c })
+    const isToolChanged = was !== undefined && was.tool !== a.tool
+    const flow = (attr: string) => (was && was.color !== c ? `<animate attributeName="${attr}" from="${was.color}" to="${c}" dur="${MORPH}" fill="freeze"/>` : '')
+    const tool = isNarrow
+      ? ''
+      : (isToolChanged ? `<text x="${toolX}" y="${y + 12.5}" class="sn mo" style="fill:${was.color}">${esc(was.tool)}</text>` : '') +
+        `<text x="${toolX}" y="${y + 12.5}" class="sn${isToolChanged ? ' mi' : ''}" style="fill:${c}">${esc(a.tool)}</text>` +
+        `<text x="${W - 9}" y="${y + 12.5}" text-anchor="end" class="sn st">${time}</text>`
+    rows.push(
+      `<rect x="0" y="${y}" width="${W}" height="${STRIP_H}" rx="${STRIP_H / 2}" fill="${c}" fill-opacity=".15">${flow('fill')}</rect>${px}` +
+        `<circle cx="${10 + indent}" cy="${y + STRIP_H / 2}" r="3" fill="${c}"${a.state === 'running' ? ' class="sd"' : ''}>${flow('fill')}</circle>` +
+        `<text x="${nameX}" y="${y + 12.5}" class="sn">${esc(name)}</text>` +
+        tool,
+    )
+  })
+  if (v.hidden.length > 0) {
+    const y = v.shown.length * (STRIP_H + STRIP_GAP)
+    const doneCount = v.hidden.filter(a => a.state === 'done').length
+    rows.push(
+      `<rect x="0" y="${y}" width="${W}" height="${STRIP_H}" rx="${STRIP_H / 2}" fill="#808080" fill-opacity=".14"/>` +
+        `<text x="10" y="${y + 12.5}" class="sn st">+${plural(v.hidden.length, 'more agent')} · ${doneCount} done</text>`,
+    )
+  }
+  return `<style>.sn{font:400 11.5px 'Anthropic Sans',ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif;fill:#F0EEFC}.st{fill-opacity:.65}
+.sd{animation:sp 1.1s ease-in-out infinite}@keyframes sp{50%{opacity:.3}}
+.mi{animation:mi ${MORPH} ease-out both}@keyframes mi{from{opacity:0;filter:blur(3px)}}
+.mo{animation:mo ${MORPH} ease-in both}@keyframes mo{to{opacity:0;filter:blur(3px)}}
+@media (prefers-reduced-motion:reduce){.sd,.mi,.mo{animation:none}.mo{opacity:0}}</style>${rows.join('')}`
+}
+
 function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? '' : 's'}`
 }
@@ -324,7 +421,9 @@ function play($: EngineInterface, name: 'decision' | 'error' | 'done') {
   )
 }
 
-const isOpenPlan = (p: Plan) => p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
+// the agents bar is the mod's own; the model never owes it an update
+const AGENTS = 'agents:auto' // slug() never yields ':', so no model id can take it
+const isOpenPlan = (p: Plan) => p.id !== AGENTS && p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
 
 const slug = (s: string) =>
   s
@@ -334,26 +433,98 @@ const slug = (s: string) =>
     .slice(0, 40) || 'plan'
 
 // adds or replaces one bar by id; keeps at most MAX_BARS, dropping finished ones first
-async function putPlan($: EngineInterface, next: Plan) {
-  const list = await read($, plans)
+// computed inside update() from the latest list, so concurrent writers (parallel agents) do not drop each other
+function placeBar(list: readonly Plan[], next: Plan): Plan[] {
   const prev = list.find(p => p.id === next.id)
   // an update keeps its row; a new bar goes to the bottom
-  let rest = prev ? list.map(p => (p.id === next.id ? next : p)) : [...list, next]
+  const rest = prev ? list.map(p => (p.id === next.id ? next : p)) : [...list, next]
   while (rest.length > MAX_BARS) {
     const doneAt = rest.findIndex(p => p.state === 'done')
     rest.splice(doneAt >= 0 ? doneAt : 0, 1)
   }
-  await update($, plans, () => rest)
-  if (next.state !== prev?.state) {
-    if (next.state === 'needs_input') play($, 'decision')
-    if (next.state === 'error') play($, 'error')
-    if (next.state === 'done') play($, 'done')
-  }
+  return rest
+}
+
+function chime($: EngineInterface, prev: PlanState | undefined, next: PlanState) {
+  if (next === prev) return
+  if (next === 'needs_input') play($, 'decision')
+  if (next === 'error') play($, 'error')
+  if (next === 'done') play($, 'done')
+}
+
+async function putPlan($: EngineInterface, next: Plan) {
+  let prev: Plan | undefined
+  await update($, plans, list => {
+    prev = list.find(p => p.id === next.id)
+    return placeBar(list, next)
+  })
+  chime($, prev?.state, next.state)
   if (!prev) await update($, isOpen, () => true)
+}
+
+// ---------- agents: drawn from engine events alone, no model calls ----------
+// each subagent lives on a bar as one state strip: the open task bar it was started under,
+// the bar of its parent agent, or the mod's own "Agents" bar when no task is open.
+// Module maps: a reload forgets running agents, whose strips then stay until the bar is closed.
+const agentHome = new Map<string, string>() // agentId -> bar id
+const toolUses = new Map<string, string>() // tool_use_id -> agentId, to find who waits on a permission
+const waiting = new Set<string>()
+let foldUntil = 0 // keep ticking until finished strips have folded
+
+// the mod's own bar mirrors its agents as steps, finished first, so percent and count read done/total
+function syncAuto(p: Plan, now: number): Plan {
+  const agents = p.agents ?? []
+  const isOver = agents.length > 0 && agents.every(a => a.state === 'done' || a.state === 'error')
+  const agentsDoneAt = isOver ? (p.agentsDoneAt ?? now) : null
+  if (p.id !== AGENTS) return { ...p, agentsDoneAt }
+  const rank = (a: AgentRun) => (a.state === 'done' ? 0 : a.state === 'error' ? 1 : 2)
+  const steps: PlanStep[] = [...agents]
+    .sort((a, b) => rank(a) - rank(b))
+    .map(a => ({ title: a.title, status: a.state === 'done' ? 'done' : a.state === 'error' ? 'error' : 'active', substeps: [] }))
+  const state: PlanState = isOver
+    ? agents.some(a => a.state === 'error') ? 'error' : 'done'
+    : agents.some(a => a.state === 'waiting') ? 'needs_input' : 'running'
+  return { ...p, agentsDoneAt, stages: [{ name: 'Agents', steps }], state }
+}
+
+function addRun(p: Plan, run: AgentRun, parentId: string | undefined, now: number): Plan {
+  // a batch that has finished makes room for the next one
+  const list = p.agentsDoneAt ? [] : [...(p.agents ?? [])]
+  let at = list.length
+  const parentAt = parentId ? list.findIndex(a => a.id === parentId) : -1
+  if (parentAt >= 0) {
+    at = parentAt + 1
+    while (at < list.length && (list[at]?.depth ?? 0) > 0) at++
+  }
+  list.splice(at, 0, run)
+  return syncAuto({ ...p, agents: list, agentsDoneAt: null }, now)
+}
+
+// changes one agent's strip inside the latest list; sounds follow the bar's state
+async function editAgent($: EngineInterface, agentId: string, change: (a: AgentRun) => AgentRun) {
+  const home = agentHome.get(agentId)
+  if (!home) return
+  const now = await $.clock.now()
+  let before: PlanState | undefined
+  let after: PlanState | undefined
+  let isFolding = false
+  await update($, plans, list =>
+    list.map(p => {
+      if (p.id !== home || !p.agents?.some(a => a.id === agentId)) return p
+      before = p.state
+      const next = syncAuto({ ...p, agents: p.agents.map(a => (a.id === agentId ? change(a) : a)) }, now)
+      after = next.state
+      isFolding = !p.agentsDoneAt && next.agentsDoneAt !== null
+      return next
+    }),
+  )
+  if (isFolding) foldUntil = now + FOLD_MS + 1500
+  if (before !== undefined && after !== undefined) chime($, before, after)
 }
 
 async function dropPlan($: EngineInterface, id: string) {
   lastHead.delete(id)
+  for (const p of await read($, plans)) if (p.id === id) for (const a of p.agents ?? []) lastStrip.delete(a.id)
   await update($, plans, list => list.filter(p => p.id !== id))
 }
 
@@ -402,7 +573,7 @@ export const register: Register = on => {
     if (list.some(p => p.state === 'needs_input')) {
       await update($, plans, all => all.map(p => (p.state === 'needs_input' ? { ...p, state: 'running' as const, note: null } : p)))
     }
-    const open = list.filter(p => p.state !== 'done')
+    const open = list.filter(p => p.state !== 'done' && p.id !== AGENTS)
     if (open.length === 0) return next(e)
     const line = `plan-progress open bars: ${open
       .map(p => {
@@ -417,18 +588,31 @@ export const register: Register = on => {
   // watches the main loop's changing calls: refuses once when multi-step work starts without a bar,
   // and reminds to update the bar when it goes stale mid-turn
   on('tool.call', async ($, e, next) => {
-    if (e.agentId || !WORK_TOOLS.has(e.tool)) return next(e)
-    workCalls += 1
-    sinceUpdate += 1
+    // a subagent's call only names its current tool on its strip; no gate, no reminders
+    if (e.agentId) {
+      const agentId = e.agentId
+      if (!agentHome.has(agentId)) return next(e)
+      await editAgent($, agentId, a => ({ ...a, state: 'running', tool: e.tool }))
+      if (e.tool_use_id) toolUses.set(e.tool_use_id, agentId)
+      const ran = await next(e)
+      if (e.tool_use_id) toolUses.delete(e.tool_use_id)
+      if (waiting.delete(agentId)) await editAgent($, agentId, a => (a.state === 'waiting' ? { ...a, state: 'running' } : a))
+      return ran
+    }
+    if (!WORK_TOOLS.has(e.tool)) return next(e)
     isWaitingOnBackground = (e as unknown as Raw).run_in_background === true
     const hasLivePlan = isPlanTouched || (await read($, plans)).some(isOpenPlan)
-    if (!hasLivePlan && !hasRefused && workCalls > WORK_BEFORE_PLAN) {
+    if (!hasLivePlan && !hasRefused && workCalls >= WORK_BEFORE_PLAN) {
       hasRefused = true
 
       return { deny: `plan-progress: several changes ahead. Create a bar with ${TOOL} first, then retry.` }
     }
     const ran = await next(e)
-    if (ran.deny === undefined && hasLivePlan && sinceUpdate >= CALLS_BEFORE_NUDGE) {
+    // a shell call that only read (ls, git status, grep) is not work
+    if (ran.deny !== undefined || ran.isReadOnly) return ran
+    workCalls += 1
+    sinceUpdate += 1
+    if (hasLivePlan && sinceUpdate >= CALLS_BEFORE_NUDGE) {
       sinceUpdate = 0
 
       return { ...ran, context: [...(ran.context ?? []), `plan-progress: bar is stale, send {id, next:true} or {id, done, active}.`] }
@@ -483,6 +667,9 @@ export const register: Register = on => {
           note: { type: 'string', description: 'One line for needs_input or error' },
         },
       },
+    })
+    $.clock.every(1000, async () => {
+      if (agentHome.size > 0 || (await $.clock.now()) < foldUntil) await update($, tick, n => n + 1)
     })
     await $.command.register({ name: 'progress', description: 'Show or hide the progress bars' })
     await $.command.register({ name: 'progress-demo', description: 'Show a sample plan in the progress bars' })
@@ -571,7 +758,7 @@ export const register: Register = on => {
     const count = (await read($, plans)).length
     const open = await read($, isOpen)
     const { Box, Button } = $.ui.resolve(e)
-    // other mods (rate-limits) add their labels to modes beneath us; keep them
+    // other mods add their labels to modes beneath us; keep them
     const below = await next(e)
     const press = () =>
       count === 0
@@ -598,10 +785,21 @@ export const register: Register = on => {
     // Desktop reports ~8 CSS px per column; glyph, gaps, percent and the close button take ~126 px.
     const titleWidth = Math.min(Math.round(total * 0.3), Math.max(...list.map(p => Math.round(textWidth(p.title, 6.4)))))
     const trackW = Math.max(120, Math.min(1400, total - titleWidth - 140))
+    await read($, tick)
+    const now = await $.clock.now()
+    // a hairline between task bars, so each bar and its agent strips read as one group
+    const divider = `<svg xmlns="http://www.w3.org/2000/svg" width="${total}" height="1"><rect width="${total}" height="1" fill="#808080" fill-opacity=".22"/></svg>`
 
     return (
       <Box flexDirection="column" gap={1}>
-        {list.map(p => {
+        {list.flatMap((p, i) => {
+          const v = visibleAgents(p, now)
+          const stripsH = v ? 5 + stripsHeight(v.shown.length + (v.hidden.length > 0 ? 1 : 0)) : 0
+          const source = v
+            ? `<svg xmlns="http://www.w3.org/2000/svg" width="${trackW}" height="${TRACK_H + stripsH}">${trackSvg(p, trackW)}<g transform="translate(0 ${TRACK_H + 5})">${stripsSvg(v, trackW, now)}</g></svg>`
+            : trackSvg(p, trackW)
+          const agentsAlt = v ? `; agents: ${(p.agents ?? []).map(a => `${a.title} ${a.state}`).join(', ')}` : ''
+          const line = i > 0 && Svg ? [<Svg key={`div-${p.id}`} source={divider} alt="" width={total} height={1} />] : []
           const w = where(p)
           const pct = p.state === 'done' ? 100 : Math.round((Math.min(w.pos, w.total) / Math.max(1, w.total)) * 100)
           const color = STATE_COLOR[p.state]
@@ -609,16 +807,17 @@ export const register: Register = on => {
           const alt =
             p.state === 'done'
               ? `${p.title}: done, ${plural(w.total, 'step')}`
-              : `${p.title}: ${stageName}, step ${w.step} of ${w.stageSize}, ${pct}%${p.note ? ` — ${p.note}` : ''}`
+              : `${p.title}: ${stageName}, step ${w.step} of ${w.stageSize}, ${pct}%${p.note ? ` — ${p.note}` : ''}${agentsAlt}`
           const bar = `${'━'.repeat(Math.round(pct / 4))}${'─'.repeat(25 - Math.round(pct / 4))}`
 
-          return (
-            <Box key={`bar-${p.id}`} flexDirection="row" alignItems="center" gap={1}>
+          return [
+            ...line,
+            <Box key={`bar-${p.id}`} flexDirection="row" alignItems={v ? 'flex-start' : 'center'} gap={1}>
               <Text color={color}>{STATE_GLYPH[p.state]}</Text>
               <Text wrap="truncate">{p.title}</Text>
               <Box flexGrow={1} />
               {Svg ? (
-                <Svg source={trackSvg(p, trackW)} alt={alt} width={trackW} height={TRACK_H} />
+                <Svg source={source} alt={alt} width={trackW} height={TRACK_H + stripsH} />
               ) : (
                 <Text>
                   <Text color={color}>{bar.replace(/─/g, '')}</Text>
@@ -628,15 +827,74 @@ export const register: Register = on => {
               )}
               <Text dimColor>{`${String(pct).padStart(3, FIGURE_SPACE)}%`}</Text>
               <Button key={`close-${p.id}`} plain dimColor label="✕" onPress={() => dropPlan($, p.id)} />
-            </Box>
-          )
+            </Box>,
+          ]
         })}
       </Box>
     )
   })
 
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (!('agentId' in started) || !started.agentId) return started
+    const id = started.agentId
+    const now = await $.clock.now()
+    const parentHome = e.parentAgentId ? agentHome.get(e.parentAgentId) : undefined
+    const home = parentHome ?? [...(await read($, plans))].reverse().find(isOpenPlan)?.id ?? AGENTS
+    agentHome.set(id, home)
+    const run: AgentRun = {
+      id,
+      title: (e.description || e.subagentType).slice(0, 60),
+      state: 'running',
+      tool: 'Starting',
+      startedAt: now,
+      endedAt: null,
+      depth: parentHome ? 1 : 0,
+    }
+    let isNew = false
+    await update($, plans, list => {
+      if (list.some(p => p.id === home)) return list.map(p => (p.id === home ? addRun(p, run, e.parentAgentId, now) : p))
+      isNew = true
+      const auto: Plan = { id: AGENTS, title: 'Agents', kind: 'todo', stages: [], state: 'running', note: null, startedAt: now }
+      return placeBar(list, addRun(auto, run, undefined, now))
+    })
+    if (isNew) await update($, isOpen, () => true)
+
+    return started
+  })
+
+  // an agent waiting on a permission prompt turns its strip amber until the call goes on
+  on('tool.check', async ($, e, next) => {
+    const verdict = await next(e)
+    const agentId = e.tool_use_id ? toolUses.get(e.tool_use_id) : undefined
+    const useId = e.tool_use_id
+    // the mode often settles an ask by itself in a blink; only a call still held after a moment waits on the person
+    if (agentId && useId && verdict.decision === 'ask') {
+      $.clock.after(600, async () => {
+        if (toolUses.get(useId) !== agentId) return
+        waiting.add(agentId)
+        await editAgent($, agentId, a => ({ ...a, state: 'waiting', tool: 'Needs approval' }))
+      })
+    }
+
+    return verdict
+  })
+
   on('turn.complete', async ($, e, next) => {
+    const agentId = e.agentId
+    if (agentId && agentHome.has(agentId)) {
+      const now = await $.clock.now()
+      const isFailed = e.reason !== 'answer'
+      const tool = e.reason === 'aborted' ? 'Stopped' : isFailed ? 'Failed' : 'Done'
+      await editAgent($, agentId, a => ({ ...a, state: isFailed ? 'error' : 'done', tool, endedAt: now }))
+      // the mod's own bar sounds through its state; a strip on a task bar sounds here
+      if (isFailed && agentHome.get(agentId) !== AGENTS) play($, 'error')
+      agentHome.delete(agentId)
+      waiting.delete(agentId)
+    }
+    // a plan whose steps are all finished closes itself
     for (const p of await read($, plans)) {
+      if (p.id === AGENTS) continue
       if (p.state === 'done') continue
       const steps = p.stages.flatMap(s => s.steps)
       if (steps.length > 0 && steps.every(s => isFinished(s.status))) await putPlan($, { ...p, state: 'done' })
