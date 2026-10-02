@@ -9,7 +9,8 @@ Live progress bars above the Claude Code prompt. Claude breaks medium and large 
 - Stage boundaries are full-height lines, steps are short ticks
 - Several bars at once, aligned, no layout shifts
 - Soft sounds when Claude needs a decision, hits an error or finishes
-- A **Progress** button in the footer hides and shows the bars
+- A **Progress** button in the footer is always there while the mod is loaded; it hides and shows the bars
+- A small bundled skill documents the tool for Claude, loaded only when needed
 
 ### Install
 
@@ -31,7 +32,7 @@ Or copy `plugins/plan-progress` into `~/.claude/skills/plan-progress` to load it
 
 ### How it works
 
-The mod registers a `plan_progress` tool. Claude creates a bar once with the full breakdown, then sends short updates such as `{id, next: true}`. A light gate asks Claude to create a bar before a task with several edits, and reminds it when a bar goes stale.
+The mod registers a `plan_progress` tool. Claude creates a bar once with the full breakdown, then sends short updates such as `{id, next: true}`. Updates cost a few dozen tokens and the rules sit in the cached system prompt. A light gate asks Claude to create a bar before a task with several edits, and reminds it when a bar goes stale.
 
 Built with Claude Code mods (function hooks). The bar looks best in the desktop app; the terminal gets a text bar.
 
