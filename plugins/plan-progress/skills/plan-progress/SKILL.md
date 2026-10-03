@@ -24,4 +24,4 @@ A plan approved in plan mode lands on the bar `plan`; move that one.
 
 The result says `done/total, state, active step`; no need to check the bar.
 
-User commands: `/progress` toggle, `/progress-demo`, `/progress-sounds`, `/progress-clear`. The **Progress** button in the footer is always shown while the mod is loaded.
+User commands: `/progress` toggles the bars, `/progress-clear` removes them. The **Progress** button in the footer is always shown while the mod is loaded.

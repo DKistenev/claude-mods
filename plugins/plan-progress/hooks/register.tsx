@@ -206,22 +206,6 @@ function st(title: string, s: StepStatus): PlanStep {
   return { title, status: s, substeps: [] }
 }
 
-const DEMO = (now: number): Plan => ({
-  id: 'demo',
-  title: 'Orders module',
-  kind: 'plan',
-  state: 'running',
-  note: null,
-  startedAt: now - 260_000,
-  stages: [
-    { name: 'Analysis', steps: [st('Read modules', 'done'), st('Find dependencies', 'done'), st('List changes', 'done')] },
-    { name: 'DB migration', steps: [st('Table schema', 'done'), st('Create migration', 'done'), st('Move data', 'active'), st('Indexes', 'pending')] },
-    { name: 'API', steps: [st('Endpoints', 'pending'), st('Validation', 'pending'), st('Access rules', 'pending')] },
-    { name: 'Interface', steps: [st('List page', 'pending'), st('Order card', 'pending'), st('Filters', 'pending'), st('Empty states', 'pending')] },
-    { name: 'Verify', steps: [st('Tests', 'pending'), st('Build', 'pending')] },
-  ],
-})
-
 // ---------- drawing ----------
 
 type Where = { pos: number; total: number; stage: number; step: number; stageSize: number }
@@ -935,7 +919,7 @@ function play($: EngineInterface, name: 'decision' | 'error' | 'done') {
 
 // the agents bar is the mod's own; the model never owes it an update
 const AGENTS = 'agents:auto' // slug() never yields ':', so no model id can take it
-const isOpenPlan = (p: Plan) => p.id !== AGENTS && p.id !== 'demo' && p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
+const isOpenPlan = (p: Plan) => p.id !== AGENTS && p.state === 'running' && !p.stages.flatMap(s => s.steps).every(s => isFinished(s.status))
 
 const slug = (s: string) =>
   s
@@ -1351,8 +1335,6 @@ export const register: Register = on => {
       if (await read($, isOpen)) await update($, tick, n => n + 1)
     })
     await $.command.register({ name: 'progress', description: 'Show or hide the progress bars' })
-    await $.command.register({ name: 'progress-demo', description: 'Show a sample plan in the progress bars' })
-    await $.command.register({ name: 'progress-sounds', description: 'Play the decision, error and done sounds' })
     await $.command.register({ name: 'progress-clear', description: 'Remove all progress bars' })
 
     return next(e)
@@ -1415,18 +1397,11 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'progress' }, async $ => {
-    if ((await read($, plans)).length === 0) return { text: 'No plan yet. /progress-demo shows a sample.' }
+    if ((await read($, plans)).length === 0) return { text: 'No plan yet. A bar appears when Claude starts a task with several steps.' }
     const open = await read($, isOpen)
     await update($, isOpen, () => !open)
 
     return { text: open ? 'Progress bars hidden.' : 'Progress bars shown.' }
-  })
-
-  on('command.run', { command: 'progress-demo' }, async $ => {
-    await putPlan($, DEMO(await $.clock.now()))
-    await update($, isOpen, () => true)
-
-    return { text: 'Sample plan shown above the prompt.' }
   })
 
   on('command.run', { command: 'progress-clear' }, async $ => {
@@ -1434,14 +1409,6 @@ export const register: Register = on => {
     await update($, plans, () => [])
 
     return { text: 'Progress bars removed.' }
-  })
-
-  on('command.run', { command: 'progress-sounds' }, async $ => {
-    play($, 'decision')
-    $.clock.after(900, () => play($, 'error'))
-    $.clock.after(1800, () => play($, 'done'))
-
-    return { text: 'Sounds: decision, error, done.' }
   })
 
   // always drawn, so the person sees the mod is loaded; dim while there is nothing to show
