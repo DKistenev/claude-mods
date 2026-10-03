@@ -406,6 +406,26 @@ const C = {
     await E.ask()
     return [`agent ${agentSounds} sounds, bar after agent question ${stateAfterAgentAsk}; main ${E.sounds.join(', ')}`, agentSounds === 0 && stateAfterAgentAsk === 'running' && E.sounds.length === 2]
   },
+  async terminal_bar_follows_the_system_appearance_after_the_turn(E) {
+    const back = cells => new Uint32Array(Uint8Array.from(Buffer.from(cells, 'base64')).buffer).at(-1)
+    await E.turnStart()
+    await create(E)
+    await E.terminal(120)
+    await E.everyTick()
+    await E.everyTick()
+    await E.turnComplete(undefined)
+    E.tick(1000)
+    await E.everyTick()
+    const light = back(E.blits.filter(b => b.key === 'track-t').at(-1).cells)
+    const before = E.blits.length
+    globalThis.DARK = true
+    await E.everyTick()
+    globalThis.DARK = false
+    const fresh = E.blits.slice(before).filter(b => b.key === 'track-t')
+    const dark = fresh.length ? back(fresh.at(-1).cells) : light
+    const lum = c => ((c >> 16) & 255) + ((c >> 8) & 255) + (c & 255)
+    return [`${fresh.length} repaint, track ${light.toString(16)} → ${dark.toString(16)}`, fresh.length > 0 && lum(dark) < lum(light)]
+  },
   async terminal_buttons_only_where_clicks_land(E) {
     await create(E)
     const band = async fs => (await E.terminal(120, fs)).filter(n => n.type === 'Button').length
