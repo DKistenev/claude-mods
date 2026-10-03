@@ -93,6 +93,24 @@ export async function boot(file, kept = new Map()) {
     agentTool: (agentId, tool) => dispatch('tool.call', { tool, agentId, tool_use_id: uid() }, () => ({ result: {} })),
     turnComplete: (agentId, reason = 'answer') => dispatch('turn.complete', { agentId, reason }, () => ({})),
     turnStart: () => dispatch('turn.start', {}, () => ({})),
+    // a question from the main loop, or from a subagent's loop when agentId is given
+    ask: agentId => dispatch('tool.call', { tool: 'AskUserQuestion', agentId, tool_use_id: uid() }, () => ({ result: {} })),
+    // an agent's call held for approval: the permission check answers "ask" and the call stays open until release()
+    hold: async agentId => {
+      const id = uid()
+      let release
+      const held = new Promise(r => (release = r))
+      let checked
+      const asked = new Promise(r => (checked = r))
+      const call = dispatch('tool.call', { tool: 'Bash', agentId, tool_use_id: id }, async () => {
+        await dispatch('tool.check', { tool: 'Bash', tool_use_id: id }, () => ({ decision: 'ask' }))
+        checked()
+        await held
+        return { result: {} }
+      })
+      await asked
+      return { release: async () => (release(), call) }
+    },
     command: name => dispatch('command.run', { command: name, args: '' }, () => ({})),
     sessionStart: () => dispatch('session.start', {}, () => ({})),
     stop: (msg = 'Done.') => dispatch('classic.Stop', { stop_hook_active: false, last_assistant_message: msg, background_tasks: [] }, () => ({})),

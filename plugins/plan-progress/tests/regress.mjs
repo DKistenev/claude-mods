@@ -372,6 +372,40 @@ const C = {
     const term = /architecture \(haiku 4\.5 · high\) +Read \d+s/.test(row)
     return [`desktop full name ${full}, tool at right ${anchored}, terminal ${term}`, full && anchored && term]
   },
+  async agents_make_no_sounds(E) {
+    // agents with no task bar open land on the mod's own Agents bar, whose state follows them
+    await E.spawn('ag1', 'Scan tests')
+    await E.spawn('ag2', 'Read docs')
+    await E.agentTool('ag1', 'Read')
+    // ag2 waits on an approval: its strip and the Agents bar turn amber
+    const held = await E.hold('ag2')
+    E.tick(700)
+    await E.fireTimers()
+    const waited = E.bar('agents:auto')?.state
+    await held.release()
+    await E.turnComplete('ag1', 'error')
+    await E.turnComplete('ag2')
+    E.tick(1000)
+    await E.fireTimers()
+    // and on a task bar: a failed agent
+    await create(E)
+    await E.spawn('ag3', 'Build')
+    await E.turnComplete('ag3', 'error')
+    return [`sounds ${E.sounds.length ? E.sounds.join(', ') : 'none'}; agents bar while waiting ${waited}`, E.sounds.length === 0 && waited === 'needs_input']
+  },
+  async agent_bar_calls_and_questions_are_silent(E) {
+    await create(E)
+    await E.call({ id: 't', state: 'needs_input', note: 'which one?', agentId: 'ag1' })
+    await E.call({ id: 't', state: 'error', note: 'failed', agentId: 'ag1' })
+    await E.call({ id: 't', state: 'running', agentId: 'ag1' })
+    await E.ask('ag1')
+    const agentSounds = E.sounds.length
+    const stateAfterAgentAsk = E.bar('t').state
+    await E.call({ id: 't', state: 'needs_input', note: 'which one?' })
+    await E.call({ id: 't', state: 'running' })
+    await E.ask()
+    return [`agent ${agentSounds} sounds, bar after agent question ${stateAfterAgentAsk}; main ${E.sounds.join(', ')}`, agentSounds === 0 && stateAfterAgentAsk === 'running' && E.sounds.length === 2]
+  },
   async terminal_buttons_only_where_clicks_land(E) {
     await create(E)
     const band = async fs => (await E.terminal(120, fs)).filter(n => n.type === 'Button').length
