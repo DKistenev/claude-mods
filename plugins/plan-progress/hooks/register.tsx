@@ -582,27 +582,29 @@ function stripsSvg(v: { shown: AgentRun[]; hidden: AgentRun[] }, all: AgentRun[]
       }
     }
     const px = [...dots].map(([cls, d]) => `<path class="${cls}" fill="${c}" fill-opacity=".32" d="${d}"/>`).join('')
-    const nameRoom = isNarrow ? SW - 24 - indent : SW * 0.5
-    const spec = [a.model ? modelName(a.model) : '', a.effort ?? ''].filter(Boolean).join(' · ')
-    const full = (a.depth > 0 ? '↳ ' : '') + a.title + (spec ? ` (${spec})` : '')
-    let name = full
-    while (name.length > 4 && textWidth(name, 6.2) > nameRoom) name = name.slice(0, -1)
-    if (name !== full) name = name.trimEnd() + '…'
-    const nameX = GUTTER + 19 + indent
-    const toolX = nameX + textWidth(name, 6.2) + 8
-    const time =
-      a.endedAt === null
-        ? liveClock(W - 9 - CLOCK_W, y, a.startedAt, 'sc', 'sn st')
-        : `<text x="${W - 9}" y="${y + 11.5}" text-anchor="end" class="sn st">${elapsed(a.endedAt - a.startedAt)}</text>`
     // a status change: the old word blurs out while the new one blurs in, and the tint flows to the new colour
     const was = lastStrip.get(a.id)
     lastStrip.set(a.id, { tool: word, color: c })
     const isWordChanged = was !== undefined && was.tool !== word
     const flow = (attr: string) => (was && was.color !== c ? `<animate attributeName="${attr}" from="${was.color}" to="${c}" dur="${MORPH}" fill="freeze"/>` : '')
+    // the tool word sits at the right, just before the clock, so the name and its model get the rest of the row
+    const toolEnd = W - 9 - CLOCK_W - 10
+    const wordW = Math.max(word ? textWidth(word, 6.2) : 0, isWordChanged && was.tool ? textWidth(was.tool, 6.2) : 0)
+    const nameX = GUTTER + 19 + indent
+    const nameRoom = isNarrow ? SW - 24 - indent : toolEnd - (wordW > 0 ? wordW + 12 : 0) - nameX
+    const spec = [a.model ? modelName(a.model) : '', a.effort ?? ''].filter(Boolean).join(' · ')
+    const full = (a.depth > 0 ? '↳ ' : '') + a.title + (spec ? ` (${spec})` : '')
+    let name = full
+    while (name.length > 4 && textWidth(name, 6.2) > nameRoom) name = name.slice(0, -1)
+    if (name !== full) name = name.trimEnd() + '…'
+    const time =
+      a.endedAt === null
+        ? liveClock(W - 9 - CLOCK_W, y, a.startedAt, 'sc', 'sn st')
+        : `<text x="${W - 9}" y="${y + 11.5}" text-anchor="end" class="sn st">${elapsed(a.endedAt - a.startedAt)}</text>`
     const tool = isNarrow
       ? ''
-      : (isWordChanged && was.tool ? `<text x="${toolX}" y="${y + 11.5}" class="sn mo" style="fill:${was.color}">${esc(was.tool)}</text>` : '') +
-        (word ? `<text x="${toolX}" y="${y + 11.5}" class="sn${isWordChanged ? ' mi' : ''}" style="fill:${c}">${esc(word)}</text>` : '') +
+      : (isWordChanged && was.tool ? `<text x="${toolEnd}" y="${y + 11.5}" text-anchor="end" class="sn mo" style="fill:${was.color}">${esc(was.tool)}</text>` : '') +
+        (word ? `<text x="${toolEnd}" y="${y + 11.5}" text-anchor="end" class="sn${isWordChanged ? ' mi' : ''}" style="fill:${c}">${esc(word)}</text>` : '') +
         time
     const html =
       gutter(y, String(all.indexOf(a) + 1), '#A8A69E') +
@@ -830,19 +832,26 @@ function stripCells(v: { shown: AgentRun[]; hidden: AgentRun[] }, W: number, now
     const dotColor = running ? mix(tint, c, 0.3 + 0.7 * q(wave(now, 1100))) : c
     g.text(2 + indent, y, '●', pack(dotColor), pack(tint))
     const time = elapsed((a.endedAt ?? now) - a.startedAt)
-    const room = W - 6 - indent - time.length - 2
     const narrow = W < 30
-    const name = fit((a.depth > 0 ? '↳ ' : '') + a.title, narrow ? W - 6 - indent : Math.floor(room * 0.55))
-    let at = 4 + indent
-    for (let i = -1; i < name.length + 1 && at + i < W - 1; i++) g.set(at + i, y, ' ', DEFAULT, pack(tint))
-    at += g.text(at, y, name, text, pack(tint)) + 1
-    if (narrow) return
-    const tool = fit(a.tool, Math.max(0, W - at - time.length - 4))
-    if (tool) {
-      for (let i = -1; i <= tool.length; i++) g.set(at + i, y, ' ', DEFAULT, pack(tint))
-      g.text(at, y, tool, pack(c), pack(tint))
-    }
     const tx = W - 2 - time.length
+    // the tool word sits at the right, just before the time, so the name and its model get the rest of the row
+    const word = narrow || !running ? '' : fit(a.tool, Math.max(0, Math.floor(W * 0.25)))
+    const toolAt = tx - 1 - word.length
+    let at = 4 + indent
+    const spec = [a.model ? modelName(a.model) : '', a.effort ?? ''].filter(Boolean).join(' · ')
+    const full = (a.depth > 0 ? '↳ ' : '') + a.title + (spec ? ` (${spec})` : '')
+    const name = fit(full, Math.max(3, (narrow ? W - 2 : word ? toolAt - 1 : tx - 1) - at))
+    // the model and effort are drawn dimmer than the name
+    const cut = spec ? name.indexOf(' (') : -1
+    const head = cut > 0 ? name.slice(0, cut) : name
+    for (let i = -1; i < name.length + 1 && at + i < W - 1; i++) g.set(at + i, y, ' ', DEFAULT, pack(tint))
+    at += g.text(at, y, head, text, pack(tint))
+    if (head !== name) g.text(at, y, name.slice(head.length), pack(mix(termFg(), tint, 0.4)), pack(tint))
+    if (narrow) return
+    if (word) {
+      for (let i = -1; i <= word.length; i++) g.set(toolAt + i, y, ' ', DEFAULT, pack(tint))
+      g.text(toolAt, y, word, pack(c), pack(tint))
+    }
     for (let i = -1; i < time.length; i++) g.set(tx + i, y, ' ', DEFAULT, pack(tint))
     g.text(tx, y, time, pack(mix(termFg(), tint, 0.35)), pack(tint))
   })

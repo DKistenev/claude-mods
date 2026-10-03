@@ -366,6 +366,19 @@ const C = {
     const first = glyphs(row.props.cells).indexOf('One')
     return [`pill text at column ${first}`, first >= 0 && first <= 2]
   },
+  async strip_tool_sits_right_and_name_keeps_its_model(E) {
+    await create(E)
+    await E.spawn('ag1', 'Review Python backend architecture')
+    await E.step('ag1', 'high')
+    await E.agentTool('ag1', 'Read')
+    const desk = (await E.view('t')).strips[0]
+    const full = desk.includes('Review Python backend architecture<tspan class="st"> (haiku 4.5 · high)</tspan>')
+    const anchored = /text-anchor="end"[^>]*>Read</.test(desk)
+    const r = (await E.terminal(110)).find(n => n.type === 'Raster' && n.props.key === 'strips-t')
+    const row = glyphs(r.props.cells).replace(/[⠀-⣿]/g, ' ')
+    const term = /architecture \(haiku 4\.5 · high\) +Read \d+s/.test(row)
+    return [`desktop full name ${full}, tool at right ${anchored}, terminal ${term}`, full && anchored && term]
+  },
   async terminal_buttons_only_where_clicks_land(E) {
     await create(E)
     const band = async fs => (await E.terminal(120, fs)).filter(n => n.type === 'Button').length
