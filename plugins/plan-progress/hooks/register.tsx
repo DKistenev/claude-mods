@@ -873,6 +873,18 @@ function syncFrames($: EngineInterface, now: number) {
   }
 }
 
+function blitPlans($: EngineInterface, b: Band, list: readonly Plan[], now: number) {
+  return Promise.all(
+    list.flatMap(p => {
+      const v = visibleAgents(p, now, stripBudget(b.list.length))
+      const strips = v ? stripCells(v, b.W, now) : null
+      const calls = [$.ui.blit({ requestId: b.requestId, key: `track-${p.id}`, cells: trackCells(p, b.W, now) })]
+      if (strips) calls.push($.ui.blit({ requestId: b.requestId, key: `strips-${p.id}`, cells: strips.cells }))
+      return calls.map(c => c.catch(() => undefined))
+    }),
+  )
+}
+
 async function animate($: EngineInterface) {
   const b = band
   if (!b || isFrameBusy) return
@@ -881,15 +893,7 @@ async function animate($: EngineInterface) {
   if (live.length === 0) return
   isFrameBusy = true
   try {
-    await Promise.all(
-      live.flatMap(p => {
-        const v = visibleAgents(p, now, stripBudget(b.list.length))
-        const strips = v ? stripCells(v, b.W, now) : null
-        const calls = [$.ui.blit({ requestId: b.requestId, key: `track-${p.id}`, cells: trackCells(p, b.W, now) })]
-        if (strips) calls.push($.ui.blit({ requestId: b.requestId, key: `strips-${p.id}`, cells: strips.cells }))
-        return calls.map(c => c.catch(() => undefined))
-      }),
-    )
+    await blitPlans($, b, live, now)
   } finally {
     isFrameBusy = false
   }
@@ -1318,7 +1322,17 @@ export const register: Register = on => {
     // a session reopened later (an app restart, a resume) finds its bars where it left them
     if ((await read($, plans)).length === 0) await restorePlans($)
     const theme = (await $.config.list().catch(() => [])).find(row => row.key === 'theme')
-    isLight = /light/i.test(String(theme?.value ?? ''))
+    const themeLight = /light/i.test(String(theme?.value ?? ''))
+    const appearance = async () => {
+      const r = await $.process.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'], { timeoutMs: 2000 }).catch(() => null)
+      const was = isLight
+      isLight = r ? !/dark/i.test(r.stdout) : themeLight
+      const b = band
+      if (was === isLight || !b) return
+      await blitPlans($, b, b.list, await $.clock.now())
+    }
+    await appearance()
+    $.clock.every(5000, appearance)
     $.clock.every(1000, async () => {
       const list = await read($, plans)
       forgetGone(list)

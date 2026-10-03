@@ -40,7 +40,7 @@ export async function boot(file, kept = new Map()) {
     },
     session: { id: async () => 'session-1' },
     audio: { play: async ({ asset }) => void sounds.push(asset) },
-    process: { run: async () => ({}) },
+    process: { run: async argv => (argv[0] === 'defaults' ? { exitCode: globalThis.DARK ? 0 : 1, stdout: globalThis.DARK ? 'Dark\n' : '' } : {}) },
     plugin: { root: '/plugin' },
     tool: { register: async spec => void (toolSpec = spec) },
     command: { register: async () => {} },
