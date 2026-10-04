@@ -1496,11 +1496,12 @@ export const register: Register = on => {
     return { text: 'Progress bars removed.' }
   })
 
-  // always drawn, so the person sees the mod is loaded; dim while there is nothing to show
+  // drawn wherever it can be pressed, so the person sees the mod is loaded; dim while there is nothing to show
   on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (e.surface === 'terminal' && e.viewport?.isFullscreen !== true) return next(e)
     const count = (await read($, plans)).length
     const open = await read($, isOpen)
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const { Box, Button } = $.ui.resolve(e)
     // other mods add their labels to modes beneath us; keep them
     const below = await next(e)
     const press = () =>
@@ -1510,11 +1511,7 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="row" alignItems="center" gap={1}>
-        {e.surface === 'terminal' && e.viewport?.isFullscreen !== true ? (
-          <Text dimColor>{count > 1 ? `Progress ${count}` : 'Progress'}</Text>
-        ) : (
-          <Button key="progress-toggle" dimColor={count === 0 || !open} label={count > 1 ? `Progress ${count}` : 'Progress'} onPress={press} />
-        )}
+        <Button key="progress-toggle" dimColor={count === 0 || !open} label={count > 1 ? `Progress ${count}` : 'Progress'} onPress={press} />
         {below}
       </Box>
     )
