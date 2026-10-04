@@ -82,6 +82,8 @@ export async function boot(file, kept = new Map()) {
     procs,
     setTheme: value => dispatch('config.set', { key: 'theme', value, previous: globalThis.THEME ?? 'dark' }, () => ({ value })),
     coreRuns,
+    // any event straight into the hooks, the core answering nothing
+    raw: (event, e) => dispatch(event, e, () => ({})),
     get toolSpec() {
       return toolSpec
     },
@@ -108,8 +110,10 @@ export async function boot(file, kept = new Map()) {
     turnStart: () => dispatch('turn.start', {}, () => ({})),
     // a question from the main loop, or from a subagent's loop when agentId is given
     ask: agentId => dispatch('tool.call', { tool: 'AskUserQuestion', agentId, tool_use_id: uid() }, () => ({ result: {} })),
-    // an agent's call held for approval: the permission check answers "ask" and the call stays open until release()
-    hold: async agentId => {
+    // an agent's call the permission check answers "ask"; the call stays open until release().
+    // dialog: true shows the person the permission dialog (classic PermissionRequest), as the default mode does;
+    // false is the auto-mode classifier settling the ask by itself, so no dialog appears and the tool just runs
+    hold: async (agentId, { dialog = true } = {}) => {
       const id = uid()
       let release
       const held = new Promise(r => (release = r))
@@ -117,6 +121,7 @@ export async function boot(file, kept = new Map()) {
       const asked = new Promise(r => (checked = r))
       const call = dispatch('tool.call', { tool: 'Bash', agentId, tool_use_id: id }, async () => {
         await dispatch('tool.check', { tool: 'Bash', tool_use_id: id }, () => ({ decision: 'ask' }))
+        if (dialog) await dispatch('classic.PermissionRequest', { hook_event_name: 'PermissionRequest', agent_id: agentId, tool_name: 'Bash', tool_input: {} }, () => ({}))
         checked()
         await held
         return { result: {} }
@@ -124,6 +129,8 @@ export async function boot(file, kept = new Map()) {
       await asked
       return { release: async () => (release(), call) }
     },
+    // the person refuses the dialog of an agent's held call
+    deny: agentId => dispatch('classic.PermissionDenied', { hook_event_name: 'PermissionDenied', agent_id: agentId, tool_name: 'Bash', tool_input: {}, tool_use_id: uid(), reason: 'no' }, () => ({})),
     command: name => dispatch('command.run', { command: name, args: '' }, () => ({})),
     sessionStart: () => dispatch('session.start', {}, () => ({})),
     stop: (msg = 'Done.') => dispatch('classic.Stop', { stop_hook_active: false, last_assistant_message: msg, background_tasks: [] }, () => ({})),

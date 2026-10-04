@@ -394,6 +394,60 @@ const C = {
     const term = /architecture \(haiku 4\.5 · high\) +Read \d+s/.test(row)
     return [`desktop full name ${full}, tool at right ${anchored}, terminal ${term}`, full && anchored && term]
   },
+  async auto_mode_ask_is_not_needs_approval(E) {
+    // issue #4: the auto-mode classifier settles an ask by itself; no dialog, so nobody is asked
+    await create(E)
+    await E.spawn('ag1', 'Run the suite')
+    const held = await E.hold('ag1', { dialog: false })
+    E.tick(5000)
+    await E.fireTimers()
+    const strip = E.bar('t').agents.find(a => a.id === 'ag1')
+    await held.release()
+    return [`while the tool runs: ${strip.state} / ${strip.tool}`, strip.state === 'running' && strip.tool === 'Bash']
+  },
+  async needs_approval_only_while_the_dialog_is_up(E) {
+    await create(E)
+    await E.spawn('ag1', 'Run the suite')
+    await E.agentTool('ag1', 'Read')
+    const held = await E.hold('ag1')
+    const asked = E.bar('t').agents.find(a => a.id === 'ag1')
+    await E.deny('ag1')
+    const denied = E.bar('t').agents.find(a => a.id === 'ag1')
+    await held.release()
+    const after = E.bar('t').agents.find(a => a.id === 'ag1')
+    const shown = `${asked.state}/${asked.tool} → ${denied.state}/${denied.tool} → ${after.state}/${after.tool}`
+    return [shown, asked.state === 'waiting' && asked.tool === 'Needs approval' && denied.state === 'running' && denied.tool === 'Bash' && after.tool === 'Bash']
+  },
+  async parallel_call_ending_keeps_the_dialog(E) {
+    // one agent runs two calls at once; the quick one ends while the other's dialog is still up
+    await create(E)
+    await E.spawn('ag1', 'Run the suite')
+    const asked = await E.hold('ag1')
+    const quick = await E.hold('ag1', { dialog: false })
+    await quick.release()
+    const during = E.bar('t').agents.find(a => a.id === 'ag1')
+    await E.deny('ag1')
+    await asked.release()
+    const after = E.bar('t').agents.find(a => a.id === 'ag1')
+    const shown = `dialog up: ${during.state}/${during.tool}, after: ${after.state}/${after.tool}`
+    return [shown, during.state === 'waiting' && during.tool === 'Needs approval' && after.state === 'running' && after.tool === 'Bash']
+  },
+  async two_dialogs_clear_one_by_one(E) {
+    await create(E)
+    await E.spawn('ag1', 'Run the suite')
+    const first = await E.hold('ag1', { dialog: false })
+    const second = await E.hold('ag1', { dialog: false })
+    await E.raw('classic.PermissionRequest', { agent_id: 'ag1', tool_name: 'Bash', tool_input: {} })
+    await E.raw('classic.PermissionRequest', { agent_id: 'ag1', tool_name: 'Bash', tool_input: {} })
+    await E.deny('ag1')
+    const one = E.bar('t').agents.find(a => a.id === 'ag1')
+    await E.deny('ag1')
+    const none = E.bar('t').agents.find(a => a.id === 'ag1')
+    await first.release()
+    await second.release()
+    const shown = `one left: ${one.state}/${one.tool}, none left: ${none.state}/${none.tool}`
+    return [shown, one.state === 'waiting' && one.tool === 'Needs approval' && none.state === 'running' && none.tool === 'Bash']
+  },
   async agents_make_no_sounds(E) {
     // agents with no task bar open land on the mod's own Agents bar, whose state follows them
     await E.spawn('ag1', 'Scan tests')

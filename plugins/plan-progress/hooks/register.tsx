@@ -1026,8 +1026,11 @@ async function editPlan($: EngineInterface, id: string, make: (prev: Plan | null
 // the bar of its parent agent, or the mod's own "Agents" bar when no task is open.
 // Module maps: a reload forgets running agents, whose strips then stay until the bar is closed.
 const agentHome = new Map<string, string>() // agentId -> bar id
-const toolUses = new Map<string, string>() // tool_use_id -> agentId, to find who waits on a permission
-const waiting = new Set<string>()
+// an agent's calls in flight, tool_use_id first: the tool, and whether a permission dialog for it is in front of the person.
+// Kept per call, since one agent may run several calls at once and only some of them ask.
+type Flight = { agentId: string; tool: string; isAsked: boolean }
+const flights = new Map<string, Flight>()
+let flightCount = 0
 let foldUntil = 0 // keep ticking until finished strips have folded
 
 // the mod's own bar mirrors its agents as steps, finished first, so percent and count read done/total
@@ -1057,6 +1060,21 @@ function addRun(p: Plan, run: AgentRun, parentId: string | undefined, now: numbe
   }
   list.splice(at, 0, run)
   return syncAuto({ ...p, agents: list, agentsDoneAt: null }, now)
+}
+
+// an agent's strip from its calls in flight: amber while any of them has a dialog up, else the latest tool;
+// a finished agent stays as it is
+async function showAgent($: EngineInterface, agentId: string, endedTool?: string) {
+  const mine = [...flights.values()].filter(f => f.agentId === agentId)
+  const isAsked = mine.some(f => f.isAsked)
+  const tool = isAsked ? 'Needs approval' : (mine.at(-1)?.tool ?? endedTool)
+  await editAgent($, agentId, a =>
+    a.state === 'running' || a.state === 'waiting' ? { ...a, state: isAsked ? 'waiting' : 'running', tool: tool ?? a.tool } : a,
+  )
+}
+
+function forgetFlights(agentId: string) {
+  for (const [id, f] of flights) if (f.agentId === agentId) flights.delete(id)
 }
 
 // changes one agent's strip inside the latest list; silent, since a subagent answers to Claude, not to the person
@@ -1092,7 +1110,7 @@ function forgetGone(list: readonly Plan[]) {
   for (const [id, home] of agentHome) {
     if (bars.has(home) && live.has(id)) continue
     agentHome.delete(id)
-    waiting.delete(id)
+    forgetFlights(id)
   }
 }
 
@@ -1282,16 +1300,15 @@ export const register: Register = on => {
     if (e.agentId) {
       const agentId = e.agentId
       if (!agentHome.has(agentId)) return next(e)
-      await editAgent($, agentId, a => ({ ...a, state: 'running', tool: e.tool }))
-      if (e.tool_use_id) toolUses.set(e.tool_use_id, agentId)
-      let ran
+      const useId = e.tool_use_id ?? `${agentId}#${++flightCount}`
+      flights.set(useId, { agentId, tool: e.tool, isAsked: false })
+      await showAgent($, agentId)
       try {
-        ran = await next(e)
+        return await next(e)
       } finally {
-        if (e.tool_use_id) toolUses.delete(e.tool_use_id)
+        flights.delete(useId)
+        await showAgent($, agentId, e.tool)
       }
-      if (waiting.delete(agentId)) await editAgent($, agentId, a => (a.state === 'waiting' ? { ...a, state: 'running' } : a))
-      return ran
     }
     if (SHELL_TOOLS.has(e.tool)) {
       isWaitingOnBackground = (e as unknown as Raw).run_in_background === true
@@ -1659,21 +1676,36 @@ export const register: Register = on => {
     return started
   })
 
-  // an agent waiting on a permission prompt turns its strip amber until the call goes on
-  on('tool.check', async ($, e, next) => {
-    const verdict = await next(e)
-    const agentId = e.tool_use_id ? toolUses.get(e.tool_use_id) : undefined
-    const useId = e.tool_use_id
-    // the mode often settles an ask by itself in a blink; only a call still held after a moment waits on the person
-    if (agentId && useId && verdict.decision === 'ask') {
-      $.clock.after(600, async () => {
-        if (toolUses.get(useId) !== agentId) return
-        waiting.add(agentId)
-        await editAgent($, agentId, a => ({ ...a, state: 'waiting', tool: 'Needs approval' }))
-      })
+  // an agent's strip turns amber only while a permission dialog for its call is really shown:
+  // an ask the auto-mode classifier settles by itself raises no dialog and asks nobody
+  on('classic.PermissionRequest', async ($, e, next) => {
+    const agentId = e.agent_id
+    // the request names no call: take that agent's oldest call of this tool not yet asked, else its oldest not asked
+    const open = [...flights.values()].filter(f => f.agentId === agentId && !f.isAsked)
+    const flight = open.find(f => f.tool === e.tool_name) ?? open[0]
+    if (agentId && flight) {
+      flight.isAsked = true
+      await showAgent($, agentId)
+    }
+    const answer = await next(e)
+    // a settings hook that answered the request leaves no dialog in front of the person
+    if (agentId && flight && answer.decision) {
+      flight.isAsked = false
+      await showAgent($, agentId)
     }
 
-    return verdict
+    return answer
+  })
+
+  on('classic.PermissionDenied', async ($, e, next) => {
+    const agentId = e.agent_id
+    const flight = flights.get(e.tool_use_id) ?? [...flights.values()].find(f => f.agentId === agentId && f.isAsked)
+    if (agentId && flight) {
+      flight.isAsked = false
+      await showAgent($, agentId)
+    }
+
+    return next(e)
   })
 
   // the first request of an agent's loop says what it runs on: the resolved model and its effort
@@ -1697,7 +1729,7 @@ export const register: Register = on => {
       const tool = e.reason === 'aborted' ? 'Stopped' : isFailed ? 'Failed' : 'Done'
       await editAgent($, agentId, a => ({ ...a, state: isFailed ? 'error' : 'done', tool, endedAt: now }))
       agentHome.delete(agentId)
-      waiting.delete(agentId)
+      forgetFlights(agentId)
     }
     // a plan whose steps are all finished closes itself
     for (const p of await read($, plans)) {
