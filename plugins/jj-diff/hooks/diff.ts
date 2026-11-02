@@ -135,12 +135,7 @@ export function totals(files: readonly DiffFile[]): { added: number; removed: nu
 
 export function dirOf(path: string): string {
   const cut = path.lastIndexOf('/')
-  if (cut <= 0) return '/'
+  if (cut < 0) return '.'
+  if (cut === 0) return '/'
   return path.slice(0, cut)
-}
-
-export function baseName(path: string): string {
-  const trimmed = path.replace(/\/+$/, '')
-  const cut = trimmed.lastIndexOf('/')
-  return cut < 0 ? trimmed : trimmed.slice(cut + 1)
 }

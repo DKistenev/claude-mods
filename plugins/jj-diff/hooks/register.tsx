@@ -3,7 +3,6 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { DiffFile, DiffMode, DiffView } from '../types'
 import {
-  baseName,
   describeRootFailure,
   diffArgv,
   dirOf,
@@ -18,10 +17,12 @@ const PANE = 'jj-diff'
 const TITLE = 'jj diff'
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const REFRESH_TOOLS = new Set([...EDIT_TOOLS, 'Bash'])
-const ROOT_TIMEOUT_MS = 15_000
-const DIFF_TIMEOUT_MS = 60_000
 const MAX_LINES_PER_FILE = 400
 const MAX_LINES_TOTAL = 3000
+
+type Limits = { rootMs: number; diffMs: number }
+const ASKED: Limits = { rootMs: 15_000, diffMs: 60_000 }
+const QUICK: Limits = { rootMs: 5_000, diffMs: 8_000 }
 
 const INITIAL: DiffView = {
   mode: 'change',
@@ -40,29 +41,47 @@ const view = atom({ plugin: 'jj-diff', key: 'view' } as const, INITIAL, { shape:
 
 type Resolved = { root: string; error?: undefined } | { root?: undefined; error: string }
 
-async function jjRoot($: EngineInterface, dir: string): Promise<Resolved> {
+const knownRoots = new Map<string, string>()
+
+async function jjRoot($: EngineInterface, dir: string, limits: Limits): Promise<Resolved> {
+  const known = knownRoots.get(dir)
+  if (known !== undefined) return { root: known }
   try {
-    const ran = await $.process.run(rootArgv(), { cwd: dir, timeoutMs: ROOT_TIMEOUT_MS })
-    if (ran.exitCode === 0 && ran.stdout.trim() !== '') return { root: ran.stdout.trim() }
+    const ran = await $.process.run(rootArgv(), { cwd: dir, timeoutMs: limits.rootMs })
+    if (ran.exitCode === 0 && ran.stdout.trim() !== '') {
+      const root = ran.stdout.trim()
+      knownRoots.set(dir, root)
+      return { root }
+    }
     return { error: describeRootFailure(ran.stderr, dir) }
   } catch (failure) {
     return { error: `jj could not run in ${dir}: ${String(failure)}` }
   }
 }
 
-async function resolveRoot($: EngineInterface, v: DiffView): Promise<Resolved> {
-  if (v.explicitRoot !== null) return jjRoot($, v.explicitRoot)
+function forgetRoot(root: string): void {
+  for (const [dir, known] of knownRoots) if (known === root) knownRoots.delete(dir)
+}
+
+async function resolveRoot($: EngineInterface, v: DiffView, limits: Limits): Promise<Resolved> {
+  if (v.explicitRoot !== null) return jjRoot($, v.explicitRoot, limits)
   if (v.followedRoot !== null) return { root: v.followedRoot }
-  return jjRoot($, await $.session.cwd())
+  return jjRoot($, await $.session.cwd(), limits)
+}
+
+function firstLine(text: string): string | null {
+  const line = text.trim().split('\n')[0]?.trim() ?? ''
+  return line === '' ? null : line
 }
 
 let isRefreshing = false
 let isRefreshPending = false
+let pendingLimits: Limits = QUICK
 
-async function refreshOnce($: EngineInterface): Promise<void> {
+async function refreshOnce($: EngineInterface, limits: Limits): Promise<void> {
   const before = await read($, view)
   await update($, view, v => ({ ...v, isLoading: true }))
-  const where = await resolveRoot($, before)
+  const where = await resolveRoot($, before, limits)
   if (where.root === undefined) {
     await update($, view, v => ({
       ...v,
@@ -80,16 +99,18 @@ async function refreshOnce($: EngineInterface): Promise<void> {
   try {
     const ran = await $.process.run(diffArgv(before.mode, before.rev), {
       cwd: root,
-      timeoutMs: DIFF_TIMEOUT_MS,
+      timeoutMs: limits.diffMs,
     })
     if (ran.exitCode === 0) {
       files = parseDiff(ran.stdout)
       if (ran.isStdoutTruncated) error = 'Diff is larger than 4 MiB; showing the first part only.'
     } else {
-      error = ran.stderr.trim().split('\n')[0] ?? `jj diff exited with ${ran.exitCode}`
+      error = firstLine(ran.stderr) ?? `jj diff exited with code ${ran.exitCode}`
+      forgetRoot(root)
     }
   } catch (failure) {
     error = `jj diff could not run: ${String(failure)}`
+    forgetRoot(root)
   }
   await update($, view, v => ({
     ...v,
@@ -101,16 +122,20 @@ async function refreshOnce($: EngineInterface): Promise<void> {
   }))
 }
 
-async function refresh($: EngineInterface): Promise<void> {
+async function refresh($: EngineInterface, limits: Limits): Promise<void> {
   if (isRefreshing) {
     isRefreshPending = true
+    if (limits.diffMs > pendingLimits.diffMs) pendingLimits = limits
     return
   }
   isRefreshing = true
+  let next = limits
   try {
     do {
       isRefreshPending = false
-      await refreshOnce($)
+      pendingLimits = QUICK
+      await refreshOnce($, next)
+      next = pendingLimits
     } while (isRefreshPending)
   } finally {
     isRefreshing = false
@@ -121,18 +146,22 @@ async function isOpen($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(pane => pane.id === PANE)
 }
 
-function absolute(path: string, cwd: string): string {
+function absolute(path: string, cwd: string, home: string | undefined): string {
   if (path.startsWith('/')) return path
-  if (path === '~' || path.startsWith('~/')) return path
-  return `${cwd.replace(/\/+$/, '')}/${path.replace(/^\.\/+/, '')}`
+  if (home !== undefined && (path === '~' || path.startsWith('~/'))) {
+    return `${home.replace(/\/+$/, '')}${path.slice(1)}`
+  }
+  const base = cwd.replace(/\/+$/, '')
+  const rest = path.replace(/^\.\/+/, '')
+  return rest === '' || rest === '.' ? base : `${base}/${rest}`
 }
 
 function summary(v: DiffView): string {
-  if (v.error !== null && v.root === null) return `jj diff: ${v.error}`
+  if (v.root === null) return `jj diff: ${v.error ?? 'nothing to show'}`
   const sum = totals(v.files)
   const count = v.files.length === 1 ? '1 file' : `${v.files.length} files`
-  const where = v.root === null ? '' : ` in ${v.root}`
-  return `jj diff pane opened: ${modeLabel(v.mode, v.rev)}, ${count}, +${sum.added} -${sum.removed}${where}`
+  const head = `jj diff pane opened: ${modeLabel(v.mode, v.rev)}, ${count}, +${sum.added} -${sum.removed} in ${v.root}`
+  return v.error === null ? head : `${head}. ${v.error}`
 }
 
 function lineColor(kind: DiffFile['hunks'][number]['lines'][number]['kind']): string | undefined {
@@ -154,7 +183,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'jj-diff',
-      description: 'Open a pane with the jj diff: /jj-diff [change|cl|rev <id>] [path]',
+      description: 'Open a pane with the jj diff: /jj-diff [change|cl|rev <id>] [path] | close',
     })
     return next(e)
   })
@@ -168,15 +197,20 @@ export const register: Register = on => {
     const request = parseArgs(e.args)
     if ('error' in request) return { text: `jj-diff: ${request.error}` }
     const cwd = await $.session.cwd()
+    const home = request.path !== null && request.path.startsWith('~') ? await $.env.get('HOME') : undefined
+    if (request.path !== null && request.path.startsWith('~') && home === undefined) {
+      return { text: 'jj-diff: HOME is not set, so ~ cannot be expanded; give the full path.' }
+    }
     await update($, view, v => ({
       ...v,
       mode: request.mode,
       rev: request.rev,
-      explicitRoot: request.path === null ? null : absolute(request.path, cwd),
+      explicitRoot: request.path === null ? null : absolute(request.path, cwd, home),
+      followedRoot: null,
       collapsed: [],
     }))
     await $.ui.open({ id: PANE, title: TITLE })
-    await refresh($)
+    await refresh($, ASKED)
     return { text: summary(await read($, view)) }
   })
 
@@ -191,15 +225,16 @@ export const register: Register = on => {
           : e.tool === 'NotebookEdit'
             ? e.notebook_path
             : null
-      if (edited !== null && typeof edited === 'string') {
-        const found = await jjRoot($, dirOf(edited))
+      if (edited !== null && typeof edited === 'string' && edited !== '') {
+        const dir = absolute(dirOf(edited), await $.session.cwd(), undefined)
+        const found = await jjRoot($, dir, QUICK)
         if (found.root !== undefined) {
           await update($, view, v =>
             v.followedRoot === found.root ? v : { ...v, followedRoot: found.root },
           )
         }
       }
-      await refresh($)
+      await refresh($, QUICK)
     } catch (failure) {
       $.ui.log(`jj-diff: refresh after ${e.tool} failed: ${String(failure)}`, { to: 'debug' })
     }
@@ -220,8 +255,9 @@ export const register: Register = on => {
       }))
     const setMode = (mode: DiffMode) => async () => {
       await update($, view, cur => ({ ...cur, mode, rev: mode === 'rev' ? cur.rev : null }))
-      await refresh($)
+      await refresh($, ASKED)
     }
+    const isSettled = v.updatedAt !== null && !v.isLoading
     let budget = MAX_LINES_TOTAL
 
     return (
@@ -235,7 +271,7 @@ export const register: Register = on => {
           <Button key="mode-cl" plain hotkey="l" onPress={setMode('cl')}>
             {v.mode === 'cl' ? '[cl]' : 'cl'}
           </Button>
-          <Button key="refresh" hotkey="r" onPress={() => refresh($)}>
+          <Button key="refresh" hotkey="r" onPress={() => refresh($, ASKED)}>
             {v.isLoading ? 'Refreshing…' : 'Refresh'}
           </Button>
         </Box>
@@ -245,9 +281,10 @@ export const register: Register = on => {
             {v.explicitRoot !== null ? ' (pinned)' : v.followedRoot !== null ? ' (followed)' : ''}
           </Text>
         )}
+        {!isSettled && <Text dimColor>Loading…</Text>}
         {v.error !== null && <Text color="error">{v.error}</Text>}
-        {v.root !== null && v.error === null && v.files.length === 0 && (
-          <Text dimColor>{v.updatedAt === null ? 'Loading…' : 'No changes.'}</Text>
+        {isSettled && v.root !== null && v.error === null && v.files.length === 0 && (
+          <Text dimColor>No changes.</Text>
         )}
         {v.files.length > 0 && (
           <Text dimColor>

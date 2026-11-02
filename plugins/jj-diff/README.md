@@ -30,7 +30,7 @@ The pane shows the file list with `+`/`-` counts and the hunks in diff colors. C
 
 ### Which repository
 
-1. A path given to `/jj-diff` wins and is shown as `(pinned)`. A later `/jj-diff` without a path unpins.
+1. A path given to `/jj-diff` wins and is shown as `(pinned)`. `~` and relative paths are accepted. A later `/jj-diff` without a path unpins and also forgets the followed repository, so the pane starts again from the session's working directory.
 2. Otherwise the pane follows the files Claude edits: after every `Edit`, `Write` or `NotebookEdit` it runs `jj root` in the edited file's directory and switches to that repository, shown as `(followed)`. This is how a secondary workspace is found: `jj root` answers inside any jj workspace, `.git` or not.
 3. Otherwise the session's working directory.
 
@@ -38,7 +38,9 @@ If none of these is a jj repo, the pane says `Not a jj repo: <dir>`.
 
 ### When it refreshes
 
-After every `Edit`, `Write`, `NotebookEdit` and `Bash` tool call finishes, and on the `Refresh` button. Nothing is polled on a timer. The refresh runs inside the tool call's hook, so Claude's next step waits for `jj diff` to finish (typically well under a second); a diff that takes longer than 60 s is given up and reported in the pane.
+After every `Edit`, `Write`, `NotebookEdit` and `Bash` tool call finishes, and on the `Refresh` button. Nothing is polled on a timer. The refresh runs inside the tool call's hook, so Claude's next step waits for `jj diff` to finish (typically well under a second). To keep a stuck jj (a lock held by another jj command, say) from stalling Claude, that in-hook refresh gives `jj root` 5 s and `jj diff` 8 s; the `/jj-diff` command and the `Refresh` button allow 15 s and 60 s. A timeout is reported in the pane, and the next tool call or button press tries again.
+
+`jj root` is run once per directory and remembered for the session; a failing `jj diff` in that repository forgets it, so a moved or deleted workspace is looked up again.
 
 ### What it runs
 
