@@ -56,3 +56,5 @@ claude plugin test plugins/jj-diff
 ```
 
 The tests drive the real hooks module through a fake engine whose `$.process.run` answers `jj root` and `jj diff` from a table, so they run without jj: mode to command mapping, repo resolution for a workspace without `.git`, the pinned path, the not-a-jj-repo message, diff parsing with counts, and the refresh after an Edit, a Bash call and the button.
+
+The same command list and parser were also checked against jj 0.45.1 on a throwaway `jj git init` repo with a `jj workspace add` secondary workspace: `jj root` answers in the workspace without `.git`, and the three modes parse into the expected files and counts.
