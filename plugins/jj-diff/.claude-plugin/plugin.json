@@ -1,0 +1,8 @@
+{
+  "name": "jj-diff",
+  "version": "0.1.0",
+  "description": "A read-only pane beside the chat showing the diff of a Jujutsu (jj) repository, secondary workspaces without .git included",
+  "author": { "name": "Kirill Serditov", "url": "https://github.com/zycck" },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}
