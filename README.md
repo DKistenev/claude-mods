@@ -52,7 +52,7 @@ Built with Claude Code mods (function hooks). The bar looks best in the desktop 
 
 ## jj-diff
 
-A read-only pane beside the chat with the diff of a [Jujutsu](https://jj-vcs.github.io/jj/) (jj) repository: the current change (`jj diff -r @`), the whole stack going to review (`--from 'trunk()' --to @`) or one change id. It follows the files Claude edits, so it also works in secondary jj workspaces that have no `.git`, where the built-in diff view shows nothing. Refreshes after every Edit, Write and Bash call. Only `jj root` and `jj diff` are ever run.
+A read-only pane beside the chat with the diff of a [Jujutsu](https://jj-vcs.github.io/jj/) (jj) repository: the current change (`jj diff -r @`), the whole stack going to review (`-r 'trunk()..@'`) or one change id. It follows the files Claude edits, so it also works in secondary jj workspaces that have no `.git`, where the built-in diff view shows nothing. Refreshes after every Edit, Write and Bash call. Only `jj root` and `jj diff` are ever run.
 
 ```
 /plugin install jj-diff --marketplace DKistenev/claude-mods

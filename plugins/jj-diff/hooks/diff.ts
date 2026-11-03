@@ -33,13 +33,13 @@ export function rootArgv(): string[] {
 
 export function diffArgv(mode: DiffMode, rev: string | null): string[] {
   const diff = [...BASE, 'diff', '--git']
-  if (mode === 'cl') return [...diff, '--from', 'trunk()', '--to', '@']
+  if (mode === 'cl') return [...diff, '-r', 'trunk()..@']
   if (mode === 'rev') return [...diff, '-r', rev ?? '@']
   return [...diff, '-r', '@']
 }
 
 export function modeLabel(mode: DiffMode, rev: string | null): string {
-  if (mode === 'cl') return 'trunk() → @'
+  if (mode === 'cl') return 'trunk()..@'
   if (mode === 'rev') return `-r ${rev ?? '@'}`
   return '@'
 }

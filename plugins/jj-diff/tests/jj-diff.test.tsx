@@ -126,7 +126,7 @@ test('argument parsing: mode, rev and path', () => {
 
 test('each mode maps to its jj diff command', () => {
   expect(diffArgv('change', null).slice(-4)).toEqual(['diff', '--git', '-r', '@'])
-  expect(diffArgv('cl', null).slice(-6)).toEqual(['diff', '--git', '--from', 'trunk()', '--to', '@'])
+  expect(diffArgv('cl', null).slice(-4)).toEqual(['diff', '--git', '-r', 'trunk()..@'])
   expect(diffArgv('rev', 'xyz').slice(-4)).toEqual(['diff', '--git', '-r', 'xyz'])
   for (const argv of [diffArgv('change', null), diffArgv('cl', null), diffArgv('rev', 'x')]) {
     expect(argv[0]).toBe('jj')
@@ -161,11 +161,11 @@ test('/jj-diff cl runs the stack diff in the session cwd and the pane lists the 
 
   const [run] = diffRuns(repo)
   expect(run?.cwd).toBe('/ws/main')
-  expect(run?.argv.slice(-4)).toEqual(['--from', 'trunk()', '--to', '@'])
+  expect(run?.argv.slice(-2)).toEqual(['-r', 'trunk()..@'])
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /trunk\(\)/ }))?.text).toContain('trunk() → @')
+    expect((await ui.find({ type: 'Text', text: /trunk\(\)/ }))?.text).toContain('trunk()..@')
     expect((await ui.find({ key: 'file:src/app.ts' }))?.text).toContain('src/app.ts')
     expect((await ui.find({ key: 'file:src/app.ts' }))?.text).toContain('+2')
     expect((await ui.find({ key: 'file:gone.txt' }))?.text).toContain('old.txt → gone.txt')
@@ -265,7 +265,7 @@ test('the pane refreshes after an Edit, a Bash call and the refresh button', asy
   expect(diffRuns(repo)).toHaveLength(4)
 
   await ui.press({ key: 'mode-cl' })
-  expect(diffRuns(repo).at(-1)?.argv).toContain('trunk()')
+  expect(diffRuns(repo).at(-1)?.argv).toContain('trunk()..@')
 
   await ui.press({ key: 'file:src/app.ts' })
   expect(await ui.find({ type: 'Text', text: /^\+const c = 4$/ })).toBeUndefined()

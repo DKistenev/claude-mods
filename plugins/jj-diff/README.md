@@ -20,13 +20,15 @@ In the desktop app itself, where `/plugin` does not run: click `+` next to the p
 
 ```
 /jj-diff                      current change:        jj diff --git -r @
-/jj-diff cl                   whole stack to review: jj diff --git --from 'trunk()' --to @
+/jj-diff cl                   whole stack to review: jj diff --git -r 'trunk()..@'
 /jj-diff rev <change-id>      one change:            jj diff --git -r <change-id>
 /jj-diff [mode] <path>        pin the pane to the jj repo or workspace at <path>
 /jj-diff close                close the pane
 ```
 
 The pane shows the file list with `+`/`-` counts and the hunks in diff colors. Click a file row to collapse or expand it. The header has `change` and `cl` buttons to switch mode (hotkeys `c` and `l` while the pane has the keyboard) and a `Refresh` button (`r`).
+
+`cl` diffs the changes in `trunk()..@`, not the trees of `trunk()` and `@`: on a stack whose base is behind trunk, `--from 'trunk()' --to @` would also show every newer trunk commit, reversed, as if the stack undid it.
 
 ### Which repository
 
