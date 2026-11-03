@@ -167,10 +167,12 @@ test('/jj-diff cl runs the stack diff in the session cwd and the pane lists the 
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /trunk\(\)/ }))?.text).toContain('trunk()..@')
     expect((await ui.find({ key: 'file:src/app.ts' }))?.text).toContain('src/app.ts')
-    expect((await ui.find({ key: 'file:src/app.ts' }))?.text).toContain('+2')
+    expect((await ui.find({ type: 'Text', text: /^\+2$/ }))?.props.color).toBe('diffAddedWord')
     expect((await ui.find({ key: 'file:gone.txt' }))?.text).toContain('old.txt → gone.txt')
-    expect((await ui.find({ type: 'Text', text: /^\+const c = 4$/ }))?.text).toBe('+const c = 4')
-    expect((await ui.find({ type: 'Text', text: /^\/ws\/main$/ }))?.text).toBe('/ws/main')
+    const code = (await ui.findAll({ type: 'Code' })).find(found => found.props.path === 'src/app.ts')
+    expect(code?.props.format).toBe('diff')
+    expect(code?.text).toContain('+const c = 4')
+    expect((await ui.find({ type: 'Text', text: /\/ws\/main$/ }))?.text).toBe('trunk()..@ · /ws/main')
     await ui.unmount()
   }
 })
@@ -206,7 +208,7 @@ test('an edit in a secondary workspace without .git follows jj root there', asyn
   expect(last?.cwd).toBe('/ws/feature')
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /\/ws\/feature/ }))?.text).toBe('/ws/feature (followed)')
+  expect((await ui.find({ type: 'Text', text: /\/ws\/feature/ }))?.text).toBe('@ · /ws/feature (followed)')
   await ui.unmount()
 })
 
@@ -222,7 +224,7 @@ test('an explicit path wins over followed edits', async ($, on) => {
   await $.tool.call({ tool: 'Write', file_path: '/ws/feature/x.txt', content: 'x' })
   expect(diffRuns(repo).every(run => run.cwd === '/ws/main')).toBe(true)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /\/ws\/main/ }))?.text).toBe('/ws/main (pinned)')
+  expect((await ui.find({ type: 'Text', text: /\/ws\/main/ }))?.text).toBe('@ · /ws/main (pinned)')
   await ui.unmount()
 })
 
@@ -264,11 +266,11 @@ test('the pane refreshes after an Edit, a Bash call and the refresh button', asy
   await ui.press({ key: 'refresh' })
   expect(diffRuns(repo)).toHaveLength(4)
 
-  await ui.press({ key: 'mode-cl' })
+  await ui.select({ key: 'mode', value: 'cl' })
   expect(diffRuns(repo).at(-1)?.argv).toContain('trunk()..@')
 
   await ui.press({ key: 'file:src/app.ts' })
-  expect(await ui.find({ type: 'Text', text: /^\+const c = 4$/ })).toBeUndefined()
+  expect((await ui.findAll({ type: 'Code' })).some(found => found.props.path === 'src/app.ts')).toBe(false)
   expect((await ui.find({ key: 'file:src/app.ts' }))?.text).toContain('▸')
   await ui.unmount()
 })

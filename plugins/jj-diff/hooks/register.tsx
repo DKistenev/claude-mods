@@ -17,8 +17,7 @@ const PANE = 'jj-diff'
 const TITLE = 'jj diff'
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit'])
 const REFRESH_TOOLS = new Set([...EDIT_TOOLS, 'Bash'])
-const MAX_LINES_PER_FILE = 400
-const MAX_LINES_TOTAL = 3000
+const MAX_CODE_CHARS = 90_000
 
 type Limits = { rootMs: number; diffMs: number }
 const ASKED: Limits = { rootMs: 15_000, diffMs: 60_000 }
@@ -164,19 +163,23 @@ function summary(v: DiffView): string {
   return v.error === null ? head : `${head}. ${v.error}`
 }
 
-function lineColor(kind: DiffFile['hunks'][number]['lines'][number]['kind']): string | undefined {
-  if (kind === 'add') return 'diffAdded'
-  if (kind === 'del') return 'diffRemoved'
-  if (kind === 'meta') return 'subtle'
-  return undefined
+function statusAside(file: DiffFile): string {
+  if (file.status === 'added') return ' (new)'
+  if (file.status === 'deleted') return ' (deleted)'
+  if (file.status === 'binary') return ' (binary)'
+  return ''
 }
 
-function statusGlyph(file: DiffFile): string {
-  if (file.status === 'added') return 'A'
-  if (file.status === 'deleted') return 'D'
-  if (file.status === 'renamed') return 'R'
-  if (file.status === 'binary') return 'B'
-  return 'M'
+function plural(count: number, word: string): string {
+  return count === 1 ? `1 ${word}` : `${count} ${word}s`
+}
+
+function hunkSource(file: DiffFile): string {
+  return file.hunks.map(hunk => [hunk.header, ...hunk.lines.map(line => line.text)].join('\n')).join('\n')
+}
+
+function displayPath(file: DiffFile): string {
+  return file.oldPath !== undefined ? `${file.oldPath} → ${file.path}` : file.path
 }
 
 export const register: Register = on => {
@@ -242,10 +245,25 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button, Code } = elements
+    const Select = 'Select' in elements ? elements.Select : undefined
     const v = await read($, view)
     const sum = totals(v.files)
     const collapsed = new Set(v.collapsed)
+    const columns = Math.max(1, (e.props.bodyColumns ?? e.viewport?.columns ?? 80) - 1)
+    const rule = () => (
+      <Text dimColor wrap="truncate-end">
+        {'─'.repeat(columns)}
+      </Text>
+    )
+    const stat = (added: number, removed: number) => (
+      <Text>
+        {added > 0 ? <Text color="diffAddedWord">{`+${added}`}</Text> : ''}
+        {added > 0 && removed > 0 ? ' ' : ''}
+        {removed > 0 ? <Text color="diffRemovedWord">{`-${removed}`}</Text> : ''}
+      </Text>
+    )
     const toggle = (path: string) => () =>
       update($, view, cur => ({
         ...cur,
@@ -253,88 +271,88 @@ export const register: Register = on => {
           ? cur.collapsed.filter(p => p !== path)
           : [...cur.collapsed, path],
       }))
-    const setMode = (mode: DiffMode) => async () => {
+    const chooseMode = async (value: string) => {
+      const mode: DiffMode = value === 'cl' ? 'cl' : value === 'rev' ? 'rev' : 'change'
       await update($, view, cur => ({ ...cur, mode, rev: mode === 'rev' ? cur.rev : null }))
       await refresh($, ASKED)
     }
     const isSettled = v.updatedAt !== null && !v.isLoading
-    let budget = MAX_LINES_TOTAL
+    const where =
+      v.explicitRoot !== null ? ' (pinned)' : v.followedRoot !== null ? ' (followed)' : ''
+    const options = [
+      { value: 'change', label: 'Current change' },
+      { value: 'cl', label: 'Stack from trunk()' },
+      ...(v.mode === 'rev' ? [{ value: 'rev', label: `Change ${v.rev ?? '@'}` }] : []),
+    ]
+    let room = MAX_CODE_CHARS
+    let withheld = 0
+
+    const bodies = v.files.map(file => {
+      const isCollapsed = collapsed.has(file.path)
+      const source = hunkSource(file)
+      const fits = source.length <= room
+      if (!isCollapsed && fits) room -= source.length
+      if (!isCollapsed && !fits) withheld += 1
+      return (
+        <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="row">
+            <Button key={`file:${file.path}`} plain onPress={toggle(file.path)}>
+              {`${isCollapsed ? '▸' : '▾'} ${displayPath(file)}`}
+            </Button>
+            <Text dimColor>{statusAside(file)}</Text>
+            <Box flexGrow={1} />
+            {stat(file.added, file.removed)}
+          </Box>
+          {isCollapsed ? null : file.hunks.length === 0 ? (
+            <Text dimColor>No text changes.</Text>
+          ) : fits ? (
+            <Code source={source} format="diff" path={file.path} wrap="truncate-end" />
+          ) : (
+            <Text dimColor>Too large to draw here; run jj diff in a terminal.</Text>
+          )}
+        </Box>
+      )
+    })
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row" gap={1}>
-          <Text bold>jj diff</Text>
-          <Text dimColor>{modeLabel(v.mode, v.rev)}</Text>
-          <Button key="mode-change" plain hotkey="c" onPress={setMode('change')}>
-            {v.mode === 'change' ? '[change]' : 'change'}
-          </Button>
-          <Button key="mode-cl" plain hotkey="l" onPress={setMode('cl')}>
-            {v.mode === 'cl' ? '[cl]' : 'cl'}
-          </Button>
-          <Button key="refresh" hotkey="r" onPress={() => refresh($, ASKED)}>
-            {v.isLoading ? 'Refreshing…' : 'Refresh'}
+        <Box flexDirection="row">
+          {v.files.length > 0 ? (
+            <Text wrap="truncate-end">
+              <Text bold>{plural(v.files.length, 'file')}</Text>
+              {' changed '}
+              {stat(sum.added, sum.removed)}
+            </Text>
+          ) : (
+            <Text bold>jj diff</Text>
+          )}
+          <Box flexGrow={1} />
+          {Select !== undefined ? (
+            <Select key="mode" label="compare" options={options} value={v.mode} onSelect={chooseMode} />
+          ) : (
+            options.map(option => (
+              <Button key={`mode-${option.value}`} plain onPress={() => chooseMode(option.value)}>
+                {option.value === v.mode ? `[${option.label}]` : option.label}
+              </Button>
+            ))
+          )}
+          <Button key="refresh" plain onPress={() => refresh($, ASKED)}>
+            {v.isLoading ? '↻ …' : '↻'}
           </Button>
         </Box>
         {v.root !== null && (
           <Text dimColor wrap="truncate-start">
-            {v.root}
-            {v.explicitRoot !== null ? ' (pinned)' : v.followedRoot !== null ? ' (followed)' : ''}
+            {`${modeLabel(v.mode, v.rev)} · ${v.root}${where}`}
           </Text>
         )}
+        {rule()}
         {!isSettled && <Text dimColor>Loading…</Text>}
         {v.error !== null && <Text color="error">{v.error}</Text>}
         {isSettled && v.root !== null && v.error === null && v.files.length === 0 && (
           <Text dimColor>No changes.</Text>
         )}
-        {v.files.length > 0 && (
-          <Text dimColor>
-            {v.files.length === 1 ? '1 file' : `${v.files.length} files`}, +{sum.added} -{sum.removed}
-          </Text>
-        )}
-        {v.files.map(file => {
-          const isCollapsed = collapsed.has(file.path)
-          const rows: JSX.Element[] = []
-          if (!isCollapsed) {
-            let shown = 0
-            let hidden = 0
-            for (const hunk of file.hunks) {
-              if (shown < MAX_LINES_PER_FILE && budget > 0) {
-                rows.push(
-                  <Text color="subtle" wrap="truncate-end">
-                    {hunk.header}
-                  </Text>,
-                )
-                shown += 1
-                budget -= 1
-              } else hidden += 1
-              for (const line of hunk.lines) {
-                if (shown >= MAX_LINES_PER_FILE || budget <= 0) {
-                  hidden += 1
-                  continue
-                }
-                rows.push(
-                  <Text color={lineColor(line.kind)} wrap="truncate-end">
-                    {line.text}
-                  </Text>,
-                )
-                shown += 1
-                budget -= 1
-              }
-            }
-            if (hidden > 0) rows.push(<Text dimColor>… {hidden} more lines</Text>)
-          }
-          return (
-            <Box flexDirection="column" marginTop={1}>
-              <Button key={`file:${file.path}`} plain onPress={toggle(file.path)}>
-                {isCollapsed ? '▸' : '▾'} {statusGlyph(file)}{' '}
-                {file.oldPath !== undefined ? `${file.oldPath} → ` : ''}
-                {file.path} <Text color="diffAdded">+{file.added}</Text>{' '}
-                <Text color="diffRemoved">-{file.removed}</Text>
-              </Button>
-              {rows}
-            </Box>
-          )
-        })}
+        {bodies}
+        {withheld > 0 && <Text dimColor>{`${plural(withheld, 'file')} not drawn: the pane's limit was reached.`}</Text>}
       </Box>
     )
   })

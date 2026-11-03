@@ -26,7 +26,7 @@ In the desktop app itself, where `/plugin` does not run: click `+` next to the p
 /jj-diff close                close the pane
 ```
 
-The pane shows the file list with `+`/`-` counts and the hunks in diff colors. Click a file row to collapse or expand it. The header has `change` and `cl` buttons to switch mode (hotkeys `c` and `l` while the pane has the keyboard) and a `Refresh` button (`r`).
+The pane is laid out like the built-in diff pane: a header with the file count and `+`/`-` totals, a `compare` picker (`Current change` or `Stack from trunk()`) and a refresh button `↻`, then each file's name row with its counts over its hunks, drawn by the engine's own diff renderer (`Code` with `format: 'diff'`), so colors and gutters match the built-in. Click a file's name to collapse or expand it. The pane draws up to 90,000 characters of hunks; files past that say so. No hotkeys: the pane never takes letters typed for the prompt.
 
 `cl` diffs the changes in `trunk()..@`, not the trees of `trunk()` and `@`: on a stack whose base is behind trunk, `--from 'trunk()' --to @` would also show every newer trunk commit, reversed, as if the stack undid it.
 
@@ -40,7 +40,7 @@ If none of these is a jj repo, the pane says `Not a jj repo: <dir>`.
 
 ### When it refreshes
 
-After every `Edit`, `Write`, `NotebookEdit` and `Bash` tool call finishes, and on the `Refresh` button. Nothing is polled on a timer. The refresh runs inside the tool call's hook, so Claude's next step waits for `jj diff` to finish (typically well under a second). To keep a stuck jj (a lock held by another jj command, say) from stalling Claude, that in-hook refresh gives `jj root` 5 s and `jj diff` 8 s; the `/jj-diff` command and the `Refresh` button allow 15 s and 60 s. A timeout is reported in the pane, and the next tool call or button press tries again.
+After every `Edit`, `Write`, `NotebookEdit` and `Bash` tool call finishes, and on the refresh button. Nothing is polled on a timer. The refresh runs inside the tool call's hook, so Claude's next step waits for `jj diff` to finish (typically well under a second). To keep a stuck jj (a lock held by another jj command, say) from stalling Claude, that in-hook refresh gives `jj root` 5 s and `jj diff` 8 s; the `/jj-diff` command and the refresh button allow 15 s and 60 s. A timeout is reported in the pane, and the next tool call or button press tries again.
 
 `jj root` is run once per directory and remembered for the session; a failing `jj diff` in that repository forgets it, so a moved or deleted workspace is looked up again.
 
