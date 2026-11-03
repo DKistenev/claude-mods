@@ -1,47 +1,15 @@
-import type { DiffFile, DiffHunk, DiffLine, DiffMode, FileStatus } from '../types'
-
-export const MODES: readonly DiffMode[] = ['change', 'cl', 'rev']
-
-export type Request = { mode: DiffMode; rev: string | null; path: string | null }
-
-export function parseArgs(args: string): Request | { error: string } {
-  const words = args.trim().split(/\s+/).filter(Boolean)
-  let mode: DiffMode = 'change'
-  let rev: string | null = null
-  let path: string | null = null
-  const first = words[0]
-  if (first !== undefined && (MODES as readonly string[]).includes(first)) {
-    mode = first as DiffMode
-    words.shift()
-    if (mode === 'rev') {
-      const id = words.shift()
-      if (id === undefined) return { error: 'rev needs a change id: /jj-diff rev <change-id>' }
-      rev = id
-    }
-  }
-  const rest = words.shift()
-  if (rest !== undefined) path = rest
-  if (words.length > 0) return { error: `unexpected argument: ${words.join(' ')}` }
-  return { mode, rev, path }
-}
+import type { DiffFile, DiffHunk, DiffLine, FileStatus } from '../types'
 
 const BASE = ['jj', '--no-pager', '--color', 'never', '--quiet']
+
+export const STACK = 'trunk()..@'
 
 export function rootArgv(): string[] {
   return [...BASE, 'root']
 }
 
-export function diffArgv(mode: DiffMode, rev: string | null): string[] {
-  const diff = [...BASE, 'diff', '--git']
-  if (mode === 'cl') return [...diff, '-r', 'trunk()..@']
-  if (mode === 'rev') return [...diff, '-r', rev ?? '@']
-  return [...diff, '-r', '@']
-}
-
-export function modeLabel(mode: DiffMode, rev: string | null): string {
-  if (mode === 'cl') return 'trunk()..@'
-  if (mode === 'rev') return `-r ${rev ?? '@'}`
-  return '@'
+export function diffArgv(): string[] {
+  return [...BASE, 'diff', '--git', '-r', STACK]
 }
 
 export function describeRootFailure(stderr: string, dir: string): string {

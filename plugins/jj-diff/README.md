@@ -18,29 +18,23 @@ In the desktop app itself, where `/plugin` does not run: click `+` next to the p
 
 ## Usage
 
-```
-/jj-diff                      current change:        jj diff --git -r @
-/jj-diff cl                   whole stack to review: jj diff --git -r 'trunk()..@'
-/jj-diff rev <change-id>      one change:            jj diff --git -r <change-id>
-/jj-diff [mode] <path>        pin the pane to the jj repo or workspace at <path>
-/jj-diff close                close the pane
-```
+Click **jj diff** in the footer under the prompt to open the pane; click it again to close it. There is no slash command.
 
-The pane is laid out like the built-in diff pane: a header with the file count and `+`/`-` totals, a `compare` picker (`Current change` or `Stack from trunk()`) and a refresh button `↻`, then each file's name row with its counts over its hunks, drawn by the engine's own diff renderer (`Code` with `format: 'diff'`), so colors and gutters match the built-in. Click a file's name to collapse or expand it. The pane draws up to 90,000 characters of hunks; files past that say so. No hotkeys: the pane never takes letters typed for the prompt.
+The pane always shows the whole stack going to review: `jj diff --git -r 'trunk()..@'`, every change between `trunk()` and `@`. With one change per workspace that is exactly the CL; it also stays right after `jj new`, when `@` is empty and the work sits in `@-`.
 
-`cl` diffs the changes in `trunk()..@`, not the trees of `trunk()` and `@`: on a stack whose base is behind trunk, `--from 'trunk()' --to @` would also show every newer trunk commit, reversed, as if the stack undid it.
+It is laid out like the built-in diff pane: a header with the file count and `+`/`-` totals and a refresh button `↻`, then each file's name row with its counts over its hunks, drawn by the engine's own diff renderer (`Code` with `format: 'diff'`), so colors and gutters match the built-in. Click a file's name to collapse or expand it. The pane draws up to 90,000 characters of hunks; files past that say so.
 
 ### Which repository
 
-1. A path given to `/jj-diff` wins and is shown as `(pinned)`. `~` and relative paths are accepted. A later `/jj-diff` without a path unpins and also forgets the followed repository, so the pane starts again from the session's working directory.
-2. Otherwise the pane follows the files Claude edits: after every `Edit`, `Write` or `NotebookEdit` it runs `jj root` in the edited file's directory and switches to that repository, shown as `(followed)`. This is how a secondary workspace is found: `jj root` answers inside any jj workspace, `.git` or not.
-3. Otherwise the session's working directory.
+1. The jj repo or workspace of the file Claude edited last: after every `Edit`, `Write` or `NotebookEdit` the pane runs `jj root` in that file's directory and switches there. `jj root` answers inside any jj workspace, `.git` or not.
+2. Before any edit, the session's working directory if it is in a jj repo.
+3. Otherwise the jj repos one level down (folders holding `.jj`), the first by name.
 
-If none of these is a jj repo, the pane says `Not a jj repo: <dir>`.
+When the pane knows more than one repo, a `repo` picker in the header switches between them. With none, the pane says it waits for the next file Claude edits in a jj repo.
 
 ### When it refreshes
 
-After every `Edit`, `Write`, `NotebookEdit` and `Bash` tool call finishes, and on the refresh button. Nothing is polled on a timer. The refresh runs inside the tool call's hook, so Claude's next step waits for `jj diff` to finish (typically well under a second). To keep a stuck jj (a lock held by another jj command, say) from stalling Claude, that in-hook refresh gives `jj root` 5 s and `jj diff` 8 s; the `/jj-diff` command and the refresh button allow 15 s and 60 s. A timeout is reported in the pane, and the next tool call or button press tries again.
+After every `Edit`, `Write`, `NotebookEdit` and `Bash` tool call finishes, and on the refresh button `↻`. Nothing is polled on a timer. The refresh runs inside the tool call's hook, so Claude's next step waits for `jj diff` to finish (typically well under a second). To keep a stuck jj (a lock held by another jj command, say) from stalling Claude, that in-hook refresh gives `jj root` 5 s and `jj diff` 8 s; opening the pane and the refresh button allow 15 s and 60 s. A timeout is reported in the pane, and the next tool call or button press tries again.
 
 `jj root` is run once per directory and remembered for the session; a failing `jj diff` in that repository forgets it, so a moved or deleted workspace is looked up again.
 
@@ -59,6 +53,6 @@ claude plugin validate plugins/jj-diff
 claude plugin test plugins/jj-diff
 ```
 
-The tests drive the real hooks module through a fake engine whose `$.process.run` answers `jj root` and `jj diff` from a table, so they run without jj: mode to command mapping, repo resolution for a workspace without `.git`, the pinned path, the not-a-jj-repo message, diff parsing with counts, and the refresh after an Edit, a Bash call and the button.
+The tests drive the real hooks module through a fake engine whose `$.process.run` answers `jj root` and `jj diff` from a table, so they run without jj: the footer button opening and closing the pane, the stack command, repo resolution for a workspace without `.git`, the jj repos found one level down and the `repo` picker, the no-repo message, diff parsing with counts, and the refresh after an Edit, a Bash call and the button.
 
-The same command list and parser were also checked against jj 0.45.1 on a throwaway `jj git init` repo with a `jj workspace add` secondary workspace: `jj root` answers in the workspace without `.git`, and the three modes parse into the expected files and counts.
+The same command list and parser were also checked against jj 0.45.1 on a throwaway `jj git init` repo with a `jj workspace add` secondary workspace: `jj root` answers in the workspace without `.git`, and the diffs parse into the expected files and counts.

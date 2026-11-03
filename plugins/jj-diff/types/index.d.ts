@@ -1,5 +1,3 @@
-export type DiffMode = 'change' | 'cl' | 'rev'
-
 export type DiffLineKind = 'add' | 'del' | 'ctx' | 'meta'
 export type DiffLine = { kind: DiffLineKind; text: string }
 export type DiffHunk = { header: string; lines: DiffLine[] }
@@ -14,11 +12,9 @@ export type DiffFile = {
 }
 
 export type DiffView = {
-  mode: DiffMode
-  rev: string | null
-  explicitRoot: string | null
-  followedRoot: string | null
+  chosenRoot: string | null
   root: string | null
+  candidates: string[]
   error: string | null
   files: DiffFile[]
   isLoading: boolean

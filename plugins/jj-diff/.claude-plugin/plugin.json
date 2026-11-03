@@ -1,6 +1,6 @@
 {
   "name": "jj-diff",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A read-only pane beside the chat showing the diff of a Jujutsu (jj) repository, secondary workspaces without .git included",
   "author": { "name": "Danila", "url": "https://github.com/DKistenev" },
   "license": "MIT",

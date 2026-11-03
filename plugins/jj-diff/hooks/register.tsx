@@ -1,17 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { DiffFile, DiffMode, DiffView } from '../types'
-import {
-  describeRootFailure,
-  diffArgv,
-  dirOf,
-  modeLabel,
-  parseArgs,
-  parseDiff,
-  rootArgv,
-  totals,
-} from './diff'
+import type { DiffFile, DiffView } from '../types'
+import { STACK, describeRootFailure, diffArgv, dirOf, parseDiff, rootArgv, totals } from './diff'
 
 const PANE = 'jj-diff'
 const TITLE = 'jj diff'
@@ -24,11 +15,9 @@ const ASKED: Limits = { rootMs: 15_000, diffMs: 60_000 }
 const QUICK: Limits = { rootMs: 5_000, diffMs: 8_000 }
 
 const INITIAL: DiffView = {
-  mode: 'change',
-  rev: null,
-  explicitRoot: null,
-  followedRoot: null,
+  chosenRoot: null,
   root: null,
+  candidates: [],
   error: null,
   files: [],
   isLoading: false,
@@ -36,7 +25,7 @@ const INITIAL: DiffView = {
   collapsed: [],
 }
 
-const view = atom({ plugin: 'jj-diff', key: 'view' } as const, INITIAL, { shape: 'view-1' })
+const view = atom({ plugin: 'jj-diff', key: 'view' } as const, INITIAL, { shape: 'view-2' })
 
 type Resolved = { root: string; error?: undefined } | { root?: undefined; error: string }
 
@@ -62,9 +51,41 @@ function forgetRoot(root: string): void {
   for (const [dir, known] of knownRoots) if (known === root) knownRoots.delete(dir)
 }
 
+async function childRepos($: EngineInterface, cwd: string): Promise<string[]> {
+  try {
+    const entries = await $.fs.list(cwd)
+    const dirs = entries.filter(entry => entry.kind === 'dir' && !entry.name.startsWith('.'))
+    const base = cwd.replace(/\/+$/, '')
+    const found: string[] = []
+    for (const entry of dirs) {
+      const path = `${base}/${entry.name}`
+      if (await $.fs.exists(`${path}/.jj`)) found.push(path)
+    }
+    return found.sort()
+  } catch {
+    return []
+  }
+}
+
+async function discover($: EngineInterface, limits: Limits): Promise<void> {
+  const cwd = await $.session.cwd()
+  const own = await jjRoot($, cwd, limits)
+  const children = own.root === undefined ? await childRepos($, cwd) : []
+  await update($, view, v => {
+    const candidates = [
+      ...new Set([
+        ...(v.chosenRoot !== null ? [v.chosenRoot] : []),
+        ...(own.root !== undefined ? [own.root] : []),
+        ...children,
+      ]),
+    ]
+    const chosenRoot = v.chosenRoot ?? (own.root === undefined ? (children[0] ?? null) : null)
+    return { ...v, candidates, chosenRoot }
+  })
+}
+
 async function resolveRoot($: EngineInterface, v: DiffView, limits: Limits): Promise<Resolved> {
-  if (v.explicitRoot !== null) return jjRoot($, v.explicitRoot, limits)
-  if (v.followedRoot !== null) return { root: v.followedRoot }
+  if (v.chosenRoot !== null) return { root: v.chosenRoot }
   return jjRoot($, await $.session.cwd(), limits)
 }
 
@@ -96,10 +117,7 @@ async function refreshOnce($: EngineInterface, limits: Limits): Promise<void> {
   let files: DiffFile[] = []
   let error: string | null = null
   try {
-    const ran = await $.process.run(diffArgv(before.mode, before.rev), {
-      cwd: root,
-      timeoutMs: limits.diffMs,
-    })
+    const ran = await $.process.run(diffArgv(), { cwd: root, timeoutMs: limits.diffMs })
     if (ran.exitCode === 0) {
       files = parseDiff(ran.stdout)
       if (ran.isStdoutTruncated) error = 'Diff is larger than 4 MiB; showing the first part only.'
@@ -145,22 +163,25 @@ async function isOpen($: EngineInterface): Promise<boolean> {
   return (await $.ui.panes()).some(pane => pane.id === PANE)
 }
 
-function absolute(path: string, cwd: string, home: string | undefined): string {
-  if (path.startsWith('/')) return path
-  if (home !== undefined && (path === '~' || path.startsWith('~/'))) {
-    return `${home.replace(/\/+$/, '')}${path.slice(1)}`
+async function togglePane($: EngineInterface): Promise<void> {
+  if (await isOpen($)) {
+    await $.ui.close({ id: PANE })
+    return
   }
+  await $.ui.open({ id: PANE, title: TITLE })
+  await discover($, ASKED)
+  await refresh($, ASKED)
+}
+
+function absolute(path: string, cwd: string): string {
+  if (path.startsWith('/')) return path
   const base = cwd.replace(/\/+$/, '')
   const rest = path.replace(/^\.\/+/, '')
   return rest === '' || rest === '.' ? base : `${base}/${rest}`
 }
 
-function summary(v: DiffView): string {
-  if (v.root === null) return `jj diff: ${v.error ?? 'nothing to show'}`
-  const sum = totals(v.files)
-  const count = v.files.length === 1 ? '1 file' : `${v.files.length} files`
-  const head = `jj diff pane opened: ${modeLabel(v.mode, v.rev)}, ${count}, +${sum.added} -${sum.removed} in ${v.root}`
-  return v.error === null ? head : `${head}. ${v.error}`
+function nameOf(path: string): string {
+  return path.replace(/\/+$/, '').split('/').pop() ?? path
 }
 
 function statusAside(file: DiffFile): string {
@@ -183,38 +204,17 @@ function displayPath(file: DiffFile): string {
 }
 
 export const register: Register = on => {
-  on('session.start', async ($, e, next) => {
-    await $.command.register({
-      name: 'jj-diff',
-      description: 'Open a pane with the jj diff: /jj-diff [change|cl|rev <id>] [path] | close',
-    })
-    return next(e)
-  })
-
-  on('command.run', { command: 'jj-diff' }, async ($, e) => {
-    const word = e.args.trim()
-    if (word === 'close') {
-      await $.ui.close({ id: PANE })
-      return { text: 'jj diff pane closed.' }
-    }
-    const request = parseArgs(e.args)
-    if ('error' in request) return { text: `jj-diff: ${request.error}` }
-    const cwd = await $.session.cwd()
-    const home = request.path !== null && request.path.startsWith('~') ? await $.env.get('HOME') : undefined
-    if (request.path !== null && request.path.startsWith('~') && home === undefined) {
-      return { text: 'jj-diff: HOME is not set, so ~ cannot be expanded; give the full path.' }
-    }
-    await update($, view, v => ({
-      ...v,
-      mode: request.mode,
-      rev: request.rev,
-      explicitRoot: request.path === null ? null : absolute(request.path, cwd, home),
-      followedRoot: null,
-      collapsed: [],
-    }))
-    await $.ui.open({ id: PANE, title: TITLE })
-    await refresh($, ASKED)
-    return { text: summary(await read($, view)) }
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    const below = await next(e)
+    const { Box, Button } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" alignItems="center" gap={1}>
+        <Button key="jj-diff-toggle" plain dimColor onPress={() => togglePane($)}>
+          jj diff
+        </Button>
+        {below}
+      </Box>
+    )
   })
 
   on('tool.call', async ($, e, next) => {
@@ -229,11 +229,18 @@ export const register: Register = on => {
             ? e.notebook_path
             : null
       if (edited !== null && typeof edited === 'string' && edited !== '') {
-        const dir = absolute(dirOf(edited), await $.session.cwd(), undefined)
+        const dir = absolute(dirOf(edited), await $.session.cwd())
         const found = await jjRoot($, dir, QUICK)
         if (found.root !== undefined) {
+          const root = found.root
           await update($, view, v =>
-            v.followedRoot === found.root ? v : { ...v, followedRoot: found.root },
+            v.chosenRoot === root
+              ? v
+              : {
+                  ...v,
+                  chosenRoot: root,
+                  candidates: v.candidates.includes(root) ? v.candidates : [...v.candidates, root].sort(),
+                },
           )
         }
       }
@@ -251,12 +258,7 @@ export const register: Register = on => {
     const v = await read($, view)
     const sum = totals(v.files)
     const collapsed = new Set(v.collapsed)
-    const columns = Math.max(1, (e.props.bodyColumns ?? e.viewport?.columns ?? 80) - 1)
-    const rule = () => (
-      <Text dimColor wrap="truncate-end">
-        {'─'.repeat(columns)}
-      </Text>
-    )
+    const columns = Math.max(1, e.props.bodyColumns - 1)
     const stat = (added: number, removed: number) => (
       <Text>
         {added > 0 ? <Text color="diffAddedWord">{`+${added}`}</Text> : ''}
@@ -271,19 +273,13 @@ export const register: Register = on => {
           ? cur.collapsed.filter(p => p !== path)
           : [...cur.collapsed, path],
       }))
-    const chooseMode = async (value: string) => {
-      const mode: DiffMode = value === 'cl' ? 'cl' : value === 'rev' ? 'rev' : 'change'
-      await update($, view, cur => ({ ...cur, mode, rev: mode === 'rev' ? cur.rev : null }))
+    const chooseRoot = async (root: string) => {
+      await update($, view, cur => ({ ...cur, chosenRoot: root, collapsed: [] }))
       await refresh($, ASKED)
     }
     const isSettled = v.updatedAt !== null && !v.isLoading
-    const where =
-      v.explicitRoot !== null ? ' (pinned)' : v.followedRoot !== null ? ' (followed)' : ''
-    const options = [
-      { value: 'change', label: 'Current change' },
-      { value: 'cl', label: 'Stack from trunk()' },
-      ...(v.mode === 'rev' ? [{ value: 'rev', label: `Change ${v.rev ?? '@'}` }] : []),
-    ]
+    const options = v.candidates.map(root => ({ value: root, label: nameOf(root) }))
+    const hasChoice = Select !== undefined && options.length > 1 && v.root !== null
     let room = MAX_CODE_CHARS
     let withheld = 0
 
@@ -327,27 +323,26 @@ export const register: Register = on => {
             <Text bold>jj diff</Text>
           )}
           <Box flexGrow={1} />
-          {Select !== undefined ? (
-            <Select key="mode" label="compare" options={options} value={v.mode} onSelect={chooseMode} />
-          ) : (
-            options.map(option => (
-              <Button key={`mode-${option.value}`} plain onPress={() => chooseMode(option.value)}>
-                {option.value === v.mode ? `[${option.label}]` : option.label}
-              </Button>
-            ))
-          )}
+          {hasChoice && Select !== undefined ? (
+            <Select key="repo" label="repo" options={options} value={v.root ?? undefined} onSelect={chooseRoot} />
+          ) : null}
           <Button key="refresh" plain onPress={() => refresh($, ASKED)}>
             {v.isLoading ? '↻ …' : '↻'}
           </Button>
         </Box>
         {v.root !== null && (
           <Text dimColor wrap="truncate-start">
-            {`${modeLabel(v.mode, v.rev)} · ${v.root}${where}`}
+            {`${STACK} · ${v.root}`}
           </Text>
         )}
-        {rule()}
+        <Text dimColor wrap="truncate-end">
+          {'─'.repeat(columns)}
+        </Text>
         {!isSettled && <Text dimColor>Loading…</Text>}
         {v.error !== null && <Text color="error">{v.error}</Text>}
+        {isSettled && v.root === null && (
+          <Text dimColor>The pane follows the next file Claude edits in a jj repo.</Text>
+        )}
         {isSettled && v.root !== null && v.error === null && v.files.length === 0 && (
           <Text dimColor>No changes.</Text>
         )}

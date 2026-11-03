@@ -1,7 +1,8 @@
 import { expect, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { diffArgv, dirOf, parseArgs, parseDiff, totals } from '../hooks/diff'
+import { diffArgv, dirOf, parseDiff, totals } from '../hooks/diff'
 
 const PANE = {
   plugin: 'jj-diff',
@@ -16,6 +17,8 @@ const PANE = {
     view: {},
   },
 } as const
+
+const FOOTER = { plugin: 'jj-diff', component: 'SessionMode', props: { modes: [] } } as const
 
 const SAMPLE = [
   'diff --git a/src/app.ts b/src/app.ts',
@@ -55,41 +58,56 @@ type Repo = {
   roots: Record<string, string>
   diff: string
   runs: Run[]
+  listing?: Record<string, string[]>
   diffFailure?: { exitCode: number; stderr: string }
-  closed?: string[]
+  isOpen?: boolean
 }
 
 function fakeJj(on: On, repo: Repo, cwd: string) {
   on('session.cwd', () => ({ value: cwd }))
-  on('env.get', (_, e) => ({ value: e.name === 'HOME' ? '/home/me' : undefined }))
-  on('ui.close', (_, e) => {
-    repo.closed = [...(repo.closed ?? []), e.id]
+  on('ui.render', { component: 'SessionMode' }, ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return <Text>auto</Text>
+  })
+  on('ui.open', () => {
+    repo.isOpen = true
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', () => {
+    repo.isOpen = false
     return { value: undefined }
   })
-  on('command.register', () => ({ value: { command: 'jj-diff' } }))
-  on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.panes', () => ({
-    value: [{ id: 'jj-diff', title: 'jj diff', isShown: true, isFocused: false, isPlaced: true }],
+    value: repo.isOpen
+      ? [{ id: 'jj-diff', title: 'jj diff', isShown: true, isFocused: false, isPlaced: true }]
+      : [],
+  }))
+  on('fs.list', (_, e) => ({
+    value: (repo.listing?.[e.path ?? cwd] ?? []).map(name => ({
+      name,
+      kind: 'dir',
+      size: 0,
+      mtimeMs: 0,
+      isLink: false,
+    })),
+  }))
+  on('fs.exists', (_, e) => ({
+    value: Object.keys(repo.roots).some(root => e.path === `${root}/.jj`),
   }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('tool.call', () => ({ result: {} }))
   on('process.run', (_, e) => {
-    const cwd = e.init?.cwd
-    repo.runs.push({ argv: e.argv, cwd, timeoutMs: e.init?.timeoutMs })
+    const dir = e.init?.cwd
+    repo.runs.push({ argv: e.argv, cwd: dir, timeoutMs: e.init?.timeoutMs })
     const done = { isStdoutTruncated: false, isStderrTruncated: false }
     if (e.argv.includes('root')) {
-      const dir = cwd ?? ''
+      const here = dir ?? ''
       const root = Object.keys(repo.roots)
-        .filter(prefix => dir === prefix || dir.startsWith(`${prefix}/`))
+        .filter(prefix => here === prefix || here.startsWith(`${prefix}/`))
         .sort((a, b) => b.length - a.length)[0]
       if (root === undefined) {
         return {
-          value: {
-            ...done,
-            exitCode: 1,
-            stdout: '',
-            stderr: `Error: There is no jj repo in "${dir}"\n`,
-          },
+          value: { ...done, exitCode: 1, stdout: '', stderr: `Error: There is no jj repo in "${here}"\n` },
         }
       }
       return { value: { ...done, exitCode: 0, stdout: `${repo.roots[root]}\n`, stderr: '' } }
@@ -103,43 +121,27 @@ function fakeJj(on: On, repo: Repo, cwd: string) {
 
 const diffRuns = (repo: Repo) => repo.runs.filter(run => run.argv.includes('diff'))
 
-const typed = (args: string) =>
-  ({
-    command: 'jj-diff',
-    args,
-    origin: { kind: 'composer' },
-    presentation: { isFullscreen: true, columns: 160 },
-  }) as const
+async function pressFooter($: Engine) {
+  const footer = await $.ui.mount({ ...FOOTER, surface: 'desktop' })
+  await footer.press({ key: 'jj-diff-toggle' })
+  await footer.unmount()
+}
 
-test('argument parsing: mode, rev and path', () => {
-  expect(parseArgs('')).toEqual({ mode: 'change', rev: null, path: null })
-  expect(parseArgs('cl')).toEqual({ mode: 'cl', rev: null, path: null })
-  expect(parseArgs('rev abc123')).toEqual({ mode: 'rev', rev: 'abc123', path: null })
-  expect(parseArgs('cl /ws/main')).toEqual({ mode: 'cl', rev: null, path: '/ws/main' })
-  expect(parseArgs('/ws/main')).toEqual({ mode: 'change', rev: null, path: '/ws/main' })
+test('the stack diff is the only command, and it only reads', () => {
+  const argv = diffArgv()
+  expect(argv.slice(-4)).toEqual(['diff', '--git', '-r', 'trunk()..@'])
+  expect(argv[0]).toBe('jj')
+  expect(argv).toContain('--no-pager')
+  expect(argv.some(word => /^(new|describe|squash|commit|edit|abandon)$/.test(word))).toBe(false)
   expect(dirOf('/ws/main/src/a.ts')).toBe('/ws/main/src')
   expect(dirOf('/a.ts')).toBe('/')
   expect(dirOf('notes.md')).toBe('.')
-  expect(parseArgs('rev')).toHaveProperty('error')
-  expect(parseArgs('change a b')).toHaveProperty('error')
-})
-
-test('each mode maps to its jj diff command', () => {
-  expect(diffArgv('change', null).slice(-4)).toEqual(['diff', '--git', '-r', '@'])
-  expect(diffArgv('cl', null).slice(-4)).toEqual(['diff', '--git', '-r', 'trunk()..@'])
-  expect(diffArgv('rev', 'xyz').slice(-4)).toEqual(['diff', '--git', '-r', 'xyz'])
-  for (const argv of [diffArgv('change', null), diffArgv('cl', null), diffArgv('rev', 'x')]) {
-    expect(argv[0]).toBe('jj')
-    expect(argv).toContain('--no-pager')
-    expect(argv.some(word => /^(new|describe|squash|commit|edit|abandon)$/.test(word))).toBe(false)
-  }
 })
 
 test('the git diff is parsed into files with counts', () => {
   const files = parseDiff(SAMPLE)
   expect(files.map(f => f.path)).toEqual(['src/app.ts', 'docs/new.md', 'gone.txt', 'img.png'])
   expect(files[0]).toMatchObject({ status: 'modified', added: 2, removed: 1 })
-  expect(files[0]?.hunks).toHaveLength(1)
   expect(files[0]?.hunks[0]?.header).toBe('@@ -1,3 +1,4 @@')
   expect(files[0]?.hunks[0]?.lines.map(l => l.kind)).toEqual(['ctx', 'del', 'add', 'add', 'ctx'])
   expect(files[1]).toMatchObject({ status: 'added', added: 2, removed: 0 })
@@ -150,103 +152,103 @@ test('the git diff is parsed into files with counts', () => {
   expect(parseDiff('')).toEqual([])
 })
 
-test('/jj-diff cl runs the stack diff in the session cwd and the pane lists the files', async ($, on) => {
+test('the footer button opens the pane on the session repo and draws the stack like the built-in diff', async ($, on) => {
   const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: SAMPLE, runs: [] }
   fakeJj(on, repo, '/ws/main/sub')
   await $.session.start({ cwd: '/ws/main/sub', surface: 'desktop', isInteractive: true })
 
-  const answer = await $.command.run(typed('cl'))
-  expect(answer.text).toContain('4 files')
-  expect(answer.text).toContain('+5 -2')
-
-  const [run] = diffRuns(repo)
-  expect(run?.cwd).toBe('/ws/main')
-  expect(run?.argv.slice(-2)).toEqual(['-r', 'trunk()..@'])
+  const footer = await $.ui.mount({ ...FOOTER, surface: 'desktop' })
+  expect((await footer.find({ key: 'jj-diff-toggle' }))?.text).toBe('jj diff')
+  expect((await footer.find({ type: 'Text', text: 'auto' }))?.text).toBe('auto')
+  await footer.press({ key: 'jj-diff-toggle' })
+  await footer.unmount()
+  expect(repo.isOpen).toBe(true)
+  expect(diffRuns(repo)[0]?.cwd).toBe('/ws/main')
+  expect(diffRuns(repo)[0]?.argv.slice(-2)).toEqual(['-r', 'trunk()..@'])
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /trunk\(\)/ }))?.text).toContain('trunk()..@')
-    expect((await ui.find({ key: 'file:src/app.ts' }))?.text).toContain('src/app.ts')
-    expect((await ui.find({ type: 'Text', text: /^\+2$/ }))?.props.color).toBe('diffAddedWord')
+    expect((await ui.find({ type: 'Text', text: /changed/ }))?.text).toContain('4 files changed')
     expect((await ui.find({ key: 'file:gone.txt' }))?.text).toContain('old.txt → gone.txt')
+    expect((await ui.find({ type: 'Text', text: /^\+2$/ }))?.props.color).toBe('diffAddedWord')
     const code = (await ui.findAll({ type: 'Code' })).find(found => found.props.path === 'src/app.ts')
     expect(code?.props.format).toBe('diff')
     expect(code?.text).toContain('+const c = 4')
     expect((await ui.find({ type: 'Text', text: /\/ws\/main$/ }))?.text).toBe('trunk()..@ · /ws/main')
+    expect(await ui.find({ key: 'repo' })).toBeUndefined()
     await ui.unmount()
   }
+
+  await pressFooter($)
+  expect(repo.isOpen).toBe(false)
 })
 
-test('a change id goes to jj diff -r', async ($, on) => {
-  const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: '', runs: [] }
-  fakeJj(on, repo, '/ws/main')
-  await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed('rev kxwqplmn'))
-  expect(diffRuns(repo)[0]?.argv.slice(-2)).toEqual(['-r', 'kxwqplmn'])
-})
-
-test('an edit in a secondary workspace without .git follows jj root there', async ($, on) => {
+test('outside a jj repo the pane finds the jj repos one level down and offers them', async ($, on) => {
   const repo: Repo = {
-    roots: { '/ws/main': '/ws/main', '/ws/feature': '/ws/feature' },
+    roots: { '/home/kkmp/k3': '/home/kkmp/k3', '/home/kkmp/k3-a-wt': '/home/kkmp/k3-a-wt' },
     diff: SAMPLE,
     runs: [],
+    listing: { '/home/kkmp': ['docs', 'k3', 'k3-a-wt'] },
   }
-  fakeJj(on, repo, '/ws/main')
-  await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed(''))
-  expect(diffRuns(repo)[0]?.cwd).toBe('/ws/main')
-
-  await $.tool.call({
-    tool: 'Edit',
-    file_path: '/ws/feature/src/lib.rs',
-    old_string: 'a',
-    new_string: 'b',
-  })
-  const rootRuns = repo.runs.filter(run => run.argv.includes('root'))
-  expect(rootRuns.some(run => run.cwd === '/ws/feature/src')).toBe(true)
-  const last = diffRuns(repo).at(-1)
-  expect(last?.cwd).toBe('/ws/feature')
+  fakeJj(on, repo, '/home/kkmp')
+  await $.session.start({ cwd: '/home/kkmp', surface: 'desktop', isInteractive: true })
+  await pressFooter($)
+  expect(diffRuns(repo)[0]?.cwd).toBe('/home/kkmp/k3')
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /\/ws\/feature/ }))?.text).toBe('@ · /ws/feature (followed)')
+  const picker = await ui.find({ key: 'repo' })
+  expect(picker?.props.options).toEqual([
+    { value: '/home/kkmp/k3', label: 'k3' },
+    { value: '/home/kkmp/k3-a-wt', label: 'k3-a-wt' },
+  ])
+  await ui.select({ key: 'repo', value: '/home/kkmp/k3-a-wt' })
+  expect(diffRuns(repo).at(-1)?.cwd).toBe('/home/kkmp/k3-a-wt')
   await ui.unmount()
 })
 
-test('an explicit path wins over followed edits', async ($, on) => {
-  const repo: Repo = {
-    roots: { '/ws/main': '/ws/main', '/ws/feature': '/ws/feature' },
-    diff: SAMPLE,
-    runs: [],
-  }
-  fakeJj(on, repo, '/ws/main')
-  await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed('change /ws/main'))
-  await $.tool.call({ tool: 'Write', file_path: '/ws/feature/x.txt', content: 'x' })
-  expect(diffRuns(repo).every(run => run.cwd === '/ws/main')).toBe(true)
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
-  expect((await ui.find({ type: 'Text', text: /\/ws\/main/ }))?.text).toBe('@ · /ws/main (pinned)')
-  await ui.unmount()
-})
-
-test('outside any jj repo the pane says so', async ($, on) => {
+test('with no jj repo anywhere the pane says what it waits for', async ($, on) => {
   const repo: Repo = { roots: {}, diff: '', runs: [] }
   fakeJj(on, repo, '/elsewhere')
   await $.session.start({ cwd: '/elsewhere', surface: 'desktop', isInteractive: true })
-  const answer = await $.command.run(typed(''))
-  expect(answer.text).toContain('Not a jj repo: /elsewhere')
+  await pressFooter($)
   expect(diffRuns(repo)).toHaveLength(0)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /Not a jj repo/ }))?.text).toBe('Not a jj repo: /elsewhere')
+    expect((await ui.find({ type: 'Text', text: /follows/ }))?.text).toContain('next file Claude edits')
     await ui.unmount()
   }
 })
 
-test('the pane refreshes after an Edit, a Bash call and the refresh button', async ($, on) => {
+test('an edit in a secondary workspace without .git switches the pane to it', async ($, on) => {
+  const repo: Repo = {
+    roots: { '/ws/main': '/ws/main', '/ws/feature': '/ws/feature' },
+    diff: SAMPLE,
+    runs: [],
+  }
+  fakeJj(on, repo, '/ws/main')
+  await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
+  await pressFooter($)
+  expect(diffRuns(repo)[0]?.cwd).toBe('/ws/main')
+
+  await $.tool.call({ tool: 'Edit', file_path: '/ws/feature/src/lib.rs', old_string: 'a', new_string: 'b' })
+  expect(repo.runs.some(run => run.argv.includes('root') && run.cwd === '/ws/feature/src')).toBe(true)
+  expect(diffRuns(repo).at(-1)?.cwd).toBe('/ws/feature')
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /\/ws\/feature$/ }))?.text).toBe('trunk()..@ · /ws/feature')
+  expect((await ui.find({ key: 'repo' }))?.props.options).toEqual([
+    { value: '/ws/feature', label: 'feature' },
+    { value: '/ws/main', label: 'main' },
+  ])
+  await ui.unmount()
+})
+
+test('the pane refreshes after an Edit, a Bash call and the refresh button, not after a Read', async ($, on) => {
   const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: '', runs: [] }
   fakeJj(on, repo, '/ws/main')
   await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed(''))
+  await pressFooter($)
   expect(diffRuns(repo)).toHaveLength(1)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -266,104 +268,60 @@ test('the pane refreshes after an Edit, a Bash call and the refresh button', asy
   await ui.press({ key: 'refresh' })
   expect(diffRuns(repo)).toHaveLength(4)
 
-  await ui.select({ key: 'mode', value: 'cl' })
-  expect(diffRuns(repo).at(-1)?.argv).toContain('trunk()..@')
-
   await ui.press({ key: 'file:src/app.ts' })
   expect((await ui.findAll({ type: 'Code' })).some(found => found.props.path === 'src/app.ts')).toBe(false)
   expect((await ui.find({ key: 'file:src/app.ts' }))?.text).toContain('▸')
   await ui.unmount()
 })
 
-test('a tool call is not refreshed while the pane is closed', async ($, on) => {
+test('a tool call runs no jj while the pane is closed', async ($, on) => {
   const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: '', runs: [] }
-  on('session.cwd', () => ({ value: '/ws/main' }))
-  on('command.register', () => ({ value: { command: 'jj-diff' } }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('tool.call', () => ({ result: {} }))
-  on('ui.panes', () => ({ value: [] }))
-  on('process.run', (_, e) => {
-    repo.runs.push({ argv: e.argv, cwd: e.init?.cwd, timeoutMs: e.init?.timeoutMs })
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
-  })
+  fakeJj(on, repo, '/ws/main')
   await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'Edit', file_path: '/ws/main/a', old_string: 'a', new_string: 'b' })
   expect(repo.runs).toHaveLength(0)
 })
 
-test('a failing jj diff is reported in the pane and in the command text', async ($, on) => {
+test('a failing jj diff is reported in the pane', async ($, on) => {
   const repo: Repo = {
     roots: { '/ws/main': '/ws/main' },
     diff: '',
     runs: [],
-    diffFailure: { exitCode: 1, stderr: 'Error: Revision "zzzz" doesn\'t exist\nHint: try jj log\n' },
+    diffFailure: { exitCode: 1, stderr: 'Error: Revision "trunk()" doesn\'t exist\nHint: try jj log\n' },
   }
   fakeJj(on, repo, '/ws/main')
   await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  const answer = await $.command.run(typed('rev zzzz'))
-  expect(answer.text).toContain('in /ws/main')
-  expect(answer.text).toContain('Revision "zzzz" doesn\'t exist')
+  await pressFooter($)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
-    expect((await ui.find({ type: 'Text', text: /Revision/ }))?.text).toBe('Error: Revision "zzzz" doesn\'t exist')
+    expect((await ui.find({ type: 'Text', text: /Revision/ }))?.text).toBe('Error: Revision "trunk()" doesn\'t exist')
     expect(await ui.find({ type: 'Text', text: /No changes/ })).toBeUndefined()
     await ui.unmount()
   }
 
   repo.diffFailure = { exitCode: 1, stderr: '' }
-  await $.command.run(typed(''))
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
   expect((await ui.find({ type: 'Text', text: /exited/ }))?.text).toBe('jj diff exited with code 1')
   await ui.unmount()
-})
-
-test('/jj-diff close closes the pane', async ($, on) => {
-  const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: '', runs: [] }
-  fakeJj(on, repo, '/ws/main')
-  await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  const answer = await $.command.run(typed('close'))
-  expect(answer.text).toBe('jj diff pane closed.')
-  expect(repo.closed).toEqual(['jj-diff'])
-  expect(repo.runs).toHaveLength(0)
-})
-
-test('a ~ path is expanded with HOME', async ($, on) => {
-  const repo: Repo = { roots: { '/home/me/repo': '/home/me/repo' }, diff: '', runs: [] }
-  fakeJj(on, repo, '/ws/main')
-  await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed('cl ~/repo'))
-  expect(diffRuns(repo)[0]?.cwd).toBe('/home/me/repo')
-  await $.command.run(typed('sub/dir'))
-  expect(repo.runs.at(-1)?.cwd).toBe('/ws/main/sub/dir')
 })
 
 test('a relative edited path is resolved against the session cwd, not /', async ($, on) => {
   const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: '', runs: [] }
   fakeJj(on, repo, '/ws/main')
   await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed(''))
+  await pressFooter($)
   await $.tool.call({ tool: 'Edit', file_path: 'notes.md', old_string: 'a', new_string: 'b' })
   const rootRuns = repo.runs.filter(run => run.argv.includes('root'))
   expect(rootRuns.some(run => run.cwd === '/')).toBe(false)
   expect(rootRuns.every(run => run.cwd === '/ws/main')).toBe(true)
 })
 
-test('/jj-diff without a path returns to the session cwd after a followed edit', async ($, on) => {
-  const repo: Repo = { roots: { '/ws/main': '/ws/main', '/ws/feature': '/ws/feature' }, diff: '', runs: [] }
-  fakeJj(on, repo, '/ws/main')
-  await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed(''))
-  await $.tool.call({ tool: 'Edit', file_path: '/ws/feature/a', old_string: 'a', new_string: 'b' })
-  expect(diffRuns(repo).at(-1)?.cwd).toBe('/ws/feature')
-  await $.command.run(typed(''))
-  expect(diffRuns(repo).at(-1)?.cwd).toBe('/ws/main')
-})
-
-test('refresh inside a tool call uses short timeouts; the command and button use long ones', async ($, on) => {
+test('refresh inside a tool call uses short timeouts; the footer and the button use long ones', async ($, on) => {
   const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: '', runs: [] }
   fakeJj(on, repo, '/ws/main')
   await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed(''))
+  await pressFooter($)
   expect(diffRuns(repo).at(-1)?.timeoutMs).toBe(60_000)
   await $.tool.call({ tool: 'Bash', command: 'true' })
   expect(diffRuns(repo).at(-1)?.timeoutMs).toBe(8_000)
@@ -377,7 +335,7 @@ test('jj root is cached per directory and forgotten when jj diff fails there', a
   const repo: Repo = { roots: { '/ws/main': '/ws/main' }, diff: '', runs: [] }
   fakeJj(on, repo, '/ws/main')
   await $.session.start({ cwd: '/ws/main', surface: 'desktop', isInteractive: true })
-  await $.command.run(typed(''))
+  await pressFooter($)
   const edit = { tool: 'Edit', file_path: '/ws/main/src/a.ts', old_string: 'a', new_string: 'b' } as const
   await $.tool.call(edit)
   await $.tool.call(edit)
