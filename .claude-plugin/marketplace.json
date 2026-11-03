@@ -12,6 +12,11 @@
       "name": "plan-progress",
       "source": "./plugins/plan-progress",
       "description": "Live plan progress bars above the Claude Code prompt with soft sounds"
+    },
+    {
+      "name": "jj-diff",
+      "source": "./plugins/jj-diff",
+      "description": "A read-only pane with the diff of a Jujutsu (jj) repository, secondary workspaces without .git included"
     }
   ]
 }
