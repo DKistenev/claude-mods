@@ -175,7 +175,7 @@ test('the footer button opens the pane on the session repo and draws the stack l
     expect(code?.props.format).toBe('diff')
     expect(code?.text).toContain('+const c = 4')
     expect(code?.text.startsWith('@@ -1,3 +1,4 @@\n')).toBe(true)
-    expect((await ui.find({ type: 'Text', text: /^⋯ line 1$/ }))?.props.dimColor).toBe(true)
+    expect(await ui.find({ type: 'Text', text: /^⋯/ })).toBeUndefined()
     expect((await ui.find({ type: 'Text', text: /\/ws\/main$/ }))?.text).toBe('trunk()..@ · /ws/main')
     expect(await ui.find({ key: 'repo' })).toBeUndefined()
     await ui.unmount()

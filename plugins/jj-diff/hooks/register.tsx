@@ -195,17 +195,12 @@ function plural(count: number, word: string): string {
   return count === 1 ? `1 ${word}` : `${count} ${word}s`
 }
 
-const HUNK_HEADER = /^(@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@)\s?(.*)$/
+const HUNK_HEADER = /^(@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@).*$/
 
-type HunkView = { label: string; source: string }
-
-function hunkView(hunk: DiffFile['hunks'][number]): HunkView {
-  const m = HUNK_HEADER.exec(hunk.header)
-  const header = m?.[1] ?? hunk.header
-  const where = m?.[2] !== undefined ? `line ${m[2]}` : ''
-  const context = m?.[3]?.trim() ?? ''
-  const label = [where, context].filter(Boolean).join(' · ')
-  return { label, source: [header, ...hunk.lines.map(line => line.text)].join('\n') }
+function fileSource(file: DiffFile): string {
+  return file.hunks
+    .map(hunk => [HUNK_HEADER.exec(hunk.header)?.[1] ?? hunk.header, ...hunk.lines.map(line => line.text)].join('\n'))
+    .join('\n')
 }
 
 function displayPath(file: DiffFile): string {
@@ -294,8 +289,8 @@ export const register: Register = on => {
 
     const bodies = v.files.map(file => {
       const isCollapsed = collapsed.has(file.path)
-      const parts = file.hunks.map(hunkView)
-      const size = parts.reduce((sum, part) => sum + part.source.length, 0)
+      const source = fileSource(file)
+      const size = source.length
       const fits = size <= room
       if (!isCollapsed && fits) room -= size
       if (!isCollapsed && !fits) withheld += 1
@@ -312,14 +307,7 @@ export const register: Register = on => {
           {isCollapsed ? null : file.hunks.length === 0 ? (
             <Text dimColor>No text changes.</Text>
           ) : fits ? (
-            parts.map(part => (
-              <Box flexDirection="column" marginTop={1}>
-                <Text dimColor wrap="truncate-end">
-                  {`⋯ ${part.label}`}
-                </Text>
-                <Code source={part.source} format="diff" path={file.path} wrap="truncate-end" />
-              </Box>
-            ))
+            <Code source={source} format="diff" path={file.path} wrap="truncate-end" />
           ) : (
             <Text dimColor>Too large to draw here; run jj diff in a terminal.</Text>
           )}

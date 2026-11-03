@@ -22,7 +22,7 @@ Click **jj diff** in the footer under the prompt to open the pane; click it agai
 
 The pane always shows the whole stack going to review: `jj diff --git -r 'trunk()..@'`, every change between `trunk()` and `@`. With one change per workspace that is exactly the CL; it also stays right after `jj new`, when `@` is empty and the work sits in `@-`.
 
-It is laid out like the built-in diff pane: a header with the file count and `+`/`-` totals and a refresh button `↻`, then each file's name row with its counts over its hunks, each under a `⋯ line N · func …` label and drawn by the engine's own diff renderer (`Code` with `format: 'diff'`), so colors and gutters match the built-in. Click a file's name to collapse or expand it. The pane draws up to 90,000 characters of hunks; files past that say so.
+It is laid out like the built-in diff pane: a header with the file count and `+`/`-` totals and a refresh button `↻`, then each file's name row with its counts over its hunks in one card, drawn by the engine's own diff renderer (`Code` with `format: 'diff'`), so colors and gutters match the built-in. Click a file's name to collapse or expand it. The pane draws up to 90,000 characters of hunks; files past that say so.
 
 ### Which repository
 
