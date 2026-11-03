@@ -1,11 +1,11 @@
 {
-  "name": "zycck-mods",
+  "name": "dkistenev-mods",
   "owner": {
-    "name": "Kirill Serditov",
-    "url": "https://github.com/zycck"
+    "name": "Danila",
+    "url": "https://github.com/DKistenev"
   },
   "metadata": {
-    "description": "Claude Code mods by zycck"
+    "description": "Claude Code mods by DKistenev, forked from zycck/claude-mods"
   },
   "plugins": [
     {
